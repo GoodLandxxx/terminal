@@ -166,6 +166,9 @@ namespace winrt::TerminalApp::implementation
         auto tabViewItem = newTabImpl->TabViewItem();
         _tabView.TabItems().InsertAt(insertPosition, tabViewItem);
 
+        // Add entry to the vertical tab sidebar
+        _AddVerticalTabEntry(*newTabImpl, insertPosition);
+
         // Set this tab's icon to the icon from the content
         _UpdateTabIcon(*newTabImpl);
 
@@ -251,26 +254,47 @@ namespace winrt::TerminalApp::implementation
     // - Handle changes in tab layout.
     void TerminalPage::_UpdateTabView()
     {
-        // The tab row should only be visible if:
-        // - we're not in focus mode
-        // - we're not in full screen, or the user has enabled fullscreen tabs
-        // - there is more than one tab, or the user has chosen to always show tabs
         const auto isVisible = !_isInFocusMode &&
                                (!_isFullscreen || _showTabsFullscreen) &&
                                (_settings.GlobalSettings().ShowTabsInTitlebar() ||
                                 (_tabs.Size() > 1) ||
                                 _settings.GlobalSettings().AlwaysShowTabs());
 
+        const auto tabPos = _settings.GlobalSettings().TabPosition();
+        const bool isVertical = (tabPos == TabPosition::Left || tabPos == TabPosition::Right);
+
         if (_tabView)
         {
-            // collapse/show the tabs themselves
             _tabView.Visibility(isVisible ? Visibility::Visible : Visibility::Collapsed);
         }
         if (_tabRow)
         {
-            // collapse/show the row that the tabs are in.
-            // NaN is the special value XAML uses for "Auto" sizing.
-            _tabRow.Height(isVisible ? NAN : 0);
+            if (isVertical)
+            {
+                // Hide the horizontal tab row but keep in visual tree
+                _tabRow.Height(0);
+                _tabRow.Opacity(0);
+                _tabRow.IsHitTestVisible(false);
+            }
+            else
+            {
+                // Show the horizontal tab row normally
+                _tabRow.ClearValue(WUX::FrameworkElement::HeightProperty());
+                _tabRow.Opacity(1);
+                _tabRow.IsHitTestVisible(true);
+            }
+        }
+        // Show/hide the vertical tab sidebar
+        if (_verticalTabListView)
+        {
+            if (auto sidebar = this->VerticalTabSidebar())
+            {
+                sidebar.Visibility((isVisible && isVertical) ? Visibility::Visible : Visibility::Collapsed);
+            }
+            if (auto grip = this->SidebarResizeGrip())
+            {
+                grip.Visibility((isVisible && isVertical) ? Visibility::Visible : Visibility::Collapsed);
+            }
         }
     }
 
@@ -528,6 +552,7 @@ namespace winrt::TerminalApp::implementation
 
         _tabs.RemoveAt(tabIndex);
         _tabView.TabItems().RemoveAt(tabIndex);
+        _RemoveVerticalTabEntry(tabIndex);
         _UpdateTabIndices();
 
         // To close the window here, we need to close the hosting window.
@@ -549,6 +574,18 @@ namespace winrt::TerminalApp::implementation
             const auto newSelectedTab = _mruTabs.GetAt(0);
             _UpdatedSelectedTab(newSelectedTab);
             _tabView.SelectedItem(newSelectedTab.TabViewItem());
+
+            // 同步侧边栏 ListView 选中项到新的 MRU 焦点 tab
+            if (_verticalTabListView)
+            {
+                uint32_t newIdx{};
+                if (_tabs.IndexOf(newSelectedTab, newIdx))
+                {
+                    _syncingTabSelection = true;
+                    _verticalTabListView.SelectedIndex(gsl::narrow_cast<int32_t>(newIdx));
+                    _syncingTabSelection = false;
+                }
+            }
         }
 
         // GH#5559 - If we were in the middle of a drag/drop, end it by clearing
@@ -1157,6 +1194,14 @@ namespace winrt::TerminalApp::implementation
             {
                 const auto tab{ _tabs.GetAt(selectedIndex) };
                 _UpdatedSelectedTab(tab);
+
+                // Sync the vertical tab sidebar selection
+                if (!_syncingTabSelection && _verticalTabListView)
+                {
+                    _syncingTabSelection = true;
+                    _verticalTabListView.SelectedIndex(selectedIndex);
+                    _syncingTabSelection = false;
+                }
             }
         }
     }
@@ -1219,6 +1264,18 @@ namespace winrt::TerminalApp::implementation
             _tabView.TabItems().RemoveAt(currentTabIndex);
             _tabView.TabItems().InsertAt(newTabIndex, tabViewItem);
             _tabView.SelectedItem(tabViewItem);
+
+            // Sync vertical tab sidebar: remove from old position, re-insert at new
+            if (_verticalTabListView)
+            {
+                auto vertItems = _verticalTabListView.Items();
+                auto vertItem = vertItems.GetAt(currentTabIndex);
+                vertItems.RemoveAt(currentTabIndex);
+                vertItems.InsertAt(newTabIndex, vertItem);
+                _syncingTabSelection = true;
+                _verticalTabListView.SelectedIndex(gsl::narrow_cast<int32_t>(newTabIndex));
+                _syncingTabSelection = false;
+            }
 
             if (auto autoPeer = Automation::Peers::FrameworkElementAutomationPeer::FromElement(*this))
             {
