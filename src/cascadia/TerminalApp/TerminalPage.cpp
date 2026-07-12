@@ -6556,6 +6556,8 @@ namespace winrt::TerminalApp::implementation
             });
         }
 
+        auto tabProj = tab;
+
         // Refresh enable/disable state for index-dependent items (Close other,
         // Close tabs after, Move left/right) right before the menu opens, since
         // the sidebar's flyout is a separate instance from the top bar's and is
