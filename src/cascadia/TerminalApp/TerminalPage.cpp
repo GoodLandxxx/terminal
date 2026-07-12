@@ -6415,16 +6415,27 @@ namespace winrt::TerminalApp::implementation
                     return;
                 }
 
-                // Fresh picker for this click — no shared state, no stale handlers.
-                auto picker = winrt::make<ColorPickupFlyout>();
+                // Use the page-owned picker so the flyout object stays alive for
+                // the whole time it is shown (a local picker would be destroyed
+                // when this click handler returns, detaching the ColorSelected
+                // handlers before the user picks a color — that was why the color
+                // never applied). Revoke the previous sidebar binding first so we
+                // don't accumulate handlers across clicks/tabs.
+                if (!page->_tabColorPicker)
+                {
+                    page->_tabColorPicker = winrt::make<ColorPickupFlyout>();
+                }
+                page->_tabColorPicker.ColorSelected(page->_sidebarColorSelectedToken);
+                page->_tabColorPicker.ColorCleared(page->_sidebarColorClearedToken);
+
                 auto tabWeak = tabImpl->get_weak();
-                picker.ColorSelected([tabWeak](auto newTabColor) {
+                page->_sidebarColorSelectedToken = page->_tabColorPicker.ColorSelected([tabWeak](auto newTabColor) {
                     if (auto t = tabWeak.get())
                     {
                         t->SetRuntimeTabColor(newTabColor);
                     }
                 });
-                picker.ColorCleared([tabWeak]() {
+                page->_sidebarColorClearedToken = page->_tabColorPicker.ColorCleared([tabWeak]() {
                     if (auto t = tabWeak.get())
                     {
                         t->ResetRuntimeTabColor();
@@ -6433,7 +6444,7 @@ namespace winrt::TerminalApp::implementation
 
                 if (auto g = gridWeak.get())
                 {
-                    picker.ShowAt(g);
+                    page->_tabColorPicker.ShowAt(g);
                 }
             });
         }
@@ -6445,14 +6456,9 @@ namespace winrt::TerminalApp::implementation
             auto textBlockWeak = winrt::make_weak(textBlock);
             auto renameBoxWeak = winrt::make_weak(renameBox);
             auto tabProj = tab;
-            // Guards against the LostFocus handler firing again after Enter/Escape
-            // already handled the commit/cancel (a TextBox hidden via Visibility
-            // still loses focus and would otherwise double-fire SetTabText).
-            auto committing = std::make_shared<bool>(false);
 
             // Begin editing.
-            renameItem.Click([weakThis, textBlockWeak, renameBoxWeak, tabProj, committing](auto&&, auto&&) {
-                *committing = false;
+            renameItem.Click([weakThis, textBlockWeak, renameBoxWeak, tabProj](auto&&, auto&&) {
                 if (auto page = weakThis.get())
                 {
                     if (auto tb = textBlockWeak.get())
@@ -6471,15 +6477,19 @@ namespace winrt::TerminalApp::implementation
                 }
             });
 
-            // Commit on Enter, cancel on Escape.
-            renameBox.KeyDown([weakThis, textBlockWeak, renameBoxWeak, tabProj, committing](auto&&, const WUX::Input::KeyRoutedEventArgs& e) {
+            // Commit on Enter, cancel on Escape. NOTE: we deliberately do NOT
+            // wire LostFocus. The sidebar ListView/flyout context causes the
+            // TextBox to lose focus the instant it is shown, so a LostFocus
+            // handler would immediately hide the box again — making the renamer
+            // "flash and vanish" before the user could type. Rename closes only
+            // on explicit Enter (commit) or Escape (cancel).
+            renameBox.KeyDown([weakThis, textBlockWeak, renameBoxWeak, tabProj](auto&&, const WUX::Input::KeyRoutedEventArgs& e) {
                 const auto key = e.OriginalKey();
                 if (key != Windows::System::VirtualKey::Enter && key != Windows::System::VirtualKey::Escape)
                 {
                     return;
                 }
                 e.Handled(true);
-                *committing = true;
                 const auto commit = (key == Windows::System::VirtualKey::Enter);
                 if (auto page = weakThis.get())
                 {
@@ -6495,31 +6505,6 @@ namespace winrt::TerminalApp::implementation
                     }
                     if (auto rb = renameBoxWeak.get())
                     {
-                        rb.Visibility(WUX::Visibility::Collapsed);
-                    }
-                    if (auto tb = textBlockWeak.get())
-                    {
-                        tb.Visibility(WUX::Visibility::Visible);
-                    }
-                }
-            });
-
-            // Commit on losing focus (e.g. user clicks elsewhere). Skipped when
-            // Enter/Escape already handled it.
-            renameBox.LostFocus([weakThis, textBlockWeak, renameBoxWeak, tabProj, committing](auto&&, auto&&) {
-                if (*committing)
-                {
-                    return;
-                }
-                *committing = true;
-                if (auto page = weakThis.get())
-                {
-                    if (auto rb = renameBoxWeak.get())
-                    {
-                        if (auto tabImpl = _GetTabImpl(tabProj))
-                        {
-                            tabImpl->SetTabText(rb.Text());
-                        }
                         rb.Visibility(WUX::Visibility::Collapsed);
                     }
                     if (auto tb = textBlockWeak.get())
@@ -6585,7 +6570,7 @@ namespace winrt::TerminalApp::implementation
         // which crashes SplitPane/MoveTab-to-new-window (hresult_error). So we
         // first select the right-clicked tab, aligning sender with focus — same
         // as the top bar where right-click implicitly selects the tab.
-        contextMenu.Opening([weakThis, index](auto&& sender, auto&&) {
+        contextMenu.Opening([weakThis, tabProj](auto&& sender, auto&&) {
             auto flyout = sender.try_as<WUX::Controls::MenuFlyout>();
             if (!flyout)
             {
@@ -6593,6 +6578,16 @@ namespace winrt::TerminalApp::implementation
             }
             auto page = weakThis.get();
             if (!page)
+            {
+                return;
+            }
+            // Look up the right-clicked tab's CURRENT position each time the menu
+            // opens. A captured build-time index goes stale after the tab is
+            // moved (the grid item follows the tab, but the captured index does
+            // not update), which made the menu act on the wrong tab. The tab
+            // object itself is the stable identity.
+            uint32_t index = 0;
+            if (!page->_tabs.IndexOf(tabProj, index))
             {
                 return;
             }

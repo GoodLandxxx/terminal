@@ -286,6 +286,12 @@ namespace winrt::TerminalApp::implementation
         Windows::UI::Xaml::Controls::MenuFlyout _workspaceFlyout{ nullptr };
         Windows::UI::Xaml::Controls::Button _workspaceDropdown{ nullptr };
         winrt::TerminalApp::ColorPickupFlyout _tabColorPicker{ nullptr };
+        // Sidebar color picker handler tokens. The sidebar reuses a page-owned
+        // _tabColorPicker (kept alive for the flyout's lifetime) and re-binds the
+        // ColorSelected/ColorCleared handlers to the right-clicked tab on each
+        // click, revoking the previous binding first.
+        winrt::event_token _sidebarColorSelectedToken{};
+        winrt::event_token _sidebarColorClearedToken{};
 
         // Vertical tab sidebar
         Windows::UI::Xaml::Controls::ListView _verticalTabListView{ nullptr };
