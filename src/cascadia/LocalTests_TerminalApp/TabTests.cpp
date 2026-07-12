@@ -97,6 +97,11 @@ namespace TerminalAppLocalTests
 
         TEST_METHOD(TestClampSwitchToTab);
 
+        // Verifies that Tab::BuildContextMenu() produces a context menu whose
+        // top-level structure matches the tab row context menu (so the sidebar
+        // can reuse it and stay aligned with the top tab bar).
+        TEST_METHOD(VerifyTabContextMenuStructure);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -1524,6 +1529,61 @@ namespace TerminalAppLocalTests
             auto focusedTabIndexOpt{ page->_GetFocusedTabIndex() };
             VERIFY_IS_TRUE(focusedTabIndexOpt.has_value());
             VERIFY_ARE_EQUAL(2u, focusedTabIndexOpt.value());
+        });
+    }
+
+    void TabTests::VerifyTabContextMenuStructure()
+    {
+        // The vertical sidebar reuses Tab::BuildContextMenu() so its right-click
+        // menu stays aligned with the top tab bar's. This test pins the menu
+        // structure so a missing/reordered item fails the build, not just the UI.
+        //
+        // Expected top-level order (see Tab::_CreateContextMenu / BuildContextMenu):
+        //   Color, Rename, Duplicate, Split, Move(submenu), Export, Find,
+        //   Restart, Separator, Close(submenu)
+        // i.e. 10 top-level entries, with a Move submenu and a Close submenu present.
+
+        auto page = _commonSetup();
+        VERIFY_IS_NOT_NULL(page);
+
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout menu{ nullptr };
+        TestOnUIThread([&page, &menu]() {
+            auto tabImpl = page->_GetTabImpl(page->_tabs.GetAt(0));
+            VERIFY_IS_NOT_NULL(tabImpl);
+            menu = tabImpl->BuildContextMenu();
+            VERIFY_IS_NOT_NULL(menu);
+        });
+
+        TestOnUIThread([&menu]() {
+            const auto items = menu.Items();
+            const uint32_t size = items.Size();
+
+            // 11 top-level entries in order:
+            //   [0]Color [1]Rename [2]Duplicate [3]Split [4]Move(submenu)
+            //   [5]Export [6]Find [7]Restart [8]Separator [9]Close(submenu)
+            //   [10]Close tab
+            // Adjust only if the menu is intentionally restructured.
+            VERIFY_ARE_EQUAL(11u, size, L"Context menu must have the full set of top-level entries");
+
+            // Entry 4 is the Move submenu (MenuFlyoutSubItem).
+            auto entry4 = items.GetAt(4);
+            VERIFY_IS_NOT_NULL(entry4.try_as<winrt::Windows::UI::Xaml::Controls::MenuFlyoutSubItem>(),
+                               L"Entry 4 must be the Move submenu");
+
+            // Entry 8 is the separator.
+            auto entry8 = items.GetAt(8);
+            VERIFY_IS_NOT_NULL(entry8.try_as<winrt::Windows::UI::Xaml::Controls::MenuFlyoutSeparator>(),
+                               L"Entry 8 must be the separator");
+
+            // Entry 9 is the Close submenu (MenuFlyoutSubItem).
+            auto entry9 = items.GetAt(9);
+            VERIFY_IS_NOT_NULL(entry9.try_as<winrt::Windows::UI::Xaml::Controls::MenuFlyoutSubItem>(),
+                               L"Entry 9 must be the Close submenu");
+
+            // Entry 10 is the Close tab leaf (MenuFlyoutItem, not a sub-item).
+            auto entry10 = items.GetAt(10);
+            VERIFY_IS_NOT_NULL(entry10.try_as<winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem>(),
+                               L"Entry 10 must be the Close tab item");
         });
     }
 

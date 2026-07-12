@@ -6290,18 +6290,28 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        // Title — use the profile name if available, fall back to tab title
+        // Title — prefer a user-set custom name (GetTabText), then the profile
+        // name, then the live tab title. The previous version always preferred
+        // the profile name, which silently overwrote a rename the user just typed.
         auto textBlock = WUX::Controls::TextBlock();
         winrt::hstring displayTitle = tab.Title();
         if (tabImpl)
         {
-            auto profile = tabImpl->GetFocusedProfile();
-            if (profile)
+            const auto customName = tabImpl->GetTabText();
+            if (!customName.empty())
             {
-                auto profileName = profile.Name();
-                if (!profileName.empty())
+                displayTitle = customName;
+            }
+            else
+            {
+                auto profile = tabImpl->GetFocusedProfile();
+                if (profile)
                 {
-                    displayTitle = profileName;
+                    auto profileName = profile.Name();
+                    if (!profileName.empty())
+                    {
+                        displayTitle = profileName;
+                    }
                 }
             }
         }
@@ -6310,6 +6320,21 @@ namespace winrt::TerminalApp::implementation
         textBlock.VerticalAlignment(WUX::VerticalAlignment::Center);
         WUX::Controls::Grid::SetColumn(textBlock, 2);
         grid.Children().Append(textBlock);
+
+        // Inline rename TextBox (collapsed by default). The top bar's renamer
+        // lives on the hidden TabViewItem in vertical mode, so the sidebar needs
+        // its own visible TextBox. On commit it calls SetTabText (same backend as
+        // the top bar), which fires Title PropertyChanged and the sidebar's
+        // existing handler refreshes this TextBlock.
+        auto renameBox = WUX::Controls::TextBox();
+        renameBox.Text(displayTitle);
+        renameBox.Visibility(WUX::Visibility::Collapsed);
+        renameBox.VerticalAlignment(WUX::VerticalAlignment::Center);
+        renameBox.BorderThickness(WUX::ThicknessHelper::FromUniformLength(0));
+        renameBox.AcceptsReturn(false);
+        renameBox.Padding(WUX::ThicknessHelper::FromUniformLength(2));
+        WUX::Controls::Grid::SetColumn(renameBox, 2);
+        grid.Children().Append(renameBox);
 
         // Close button
         auto closeBtn = WUX::Controls::Button();
@@ -6353,130 +6378,352 @@ namespace winrt::TerminalApp::implementation
 
         grid.Children().Append(closeBtn);
 
-        // Right-click context menu with color picker
-        auto contextMenu = WUX::Controls::MenuFlyout();
-        auto colorMenuItem = WUX::Controls::MenuFlyoutItem();
-        colorMenuItem.Text(L"Set Tab Color...");
-        WUX::Controls::FontIcon colorIcon;
-        colorIcon.FontFamily(WUX::Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
-        colorIcon.Glyph(L"\xE790");
-        colorMenuItem.Icon(colorIcon);
-        auto gridWeak = winrt::make_weak(grid);
-        colorMenuItem.Click([weakThis, gridWeak](auto&&, auto&&) {
-            if (auto page = weakThis.get())
-            {
-                auto selectedIdx = page->_verticalTabListView.SelectedIndex();
-                if (selectedIdx >= 0 && selectedIdx < gsl::narrow_cast<int32_t>(page->_tabs.Size()))
+        // Right-click context menu: reuse Tab::BuildContextMenu() so the sidebar
+        // menu stays aligned with the top tab bar's menu (same items, same
+        // handlers routed through ShortcutActionDispatch). The only sidebar-
+        // specific tweak is the color picker: in vertical mode the TabViewItem is
+        // hidden, so we re-anchor the color picker to this sidebar grid item.
+        // Defensive: BuildContextMenu lives on the implementation type. In
+        // practice tabImpl is always present for a live tab; if not, we simply
+        // skip attaching a context menu and still register the title/status
+        // subscriptions below. (tabImpl was created earlier in this function.)
+        if (tabImpl)
+        {
+        auto contextMenu = tabImpl->BuildContextMenu();
+
+        // Entry [0] is the "Change tab color" item. The sidebar does NOT reuse
+        // Tab::AttachColorPicker: that path's Closed handler revokes the
+        // ColorSelected token, and combined with the Hide()->ShowAt() re-anchor
+        // the sidebar needs, it revoked the handlers before the user picked a
+        // color (so the color never applied). Instead the sidebar owns its own
+        // fresh per-click picker: wire ColorSelected/ColorCleared straight to the
+        // right-clicked tab, then ShowAt on this grid (no Hide first). A brand-new
+        // flyout each click also avoids accumulating handlers on a shared instance.
+        if (auto colorItem = contextMenu.Items().GetAt(0).try_as<WUX::Controls::MenuFlyoutItem>())
+        {
+            auto gridWeak = winrt::make_weak(grid);
+            auto tabProj = tab;
+            colorItem.Click([weakThis, gridWeak, tabProj](auto&&, auto&&) {
+                auto page = weakThis.get();
+                if (!page)
                 {
-                    auto selectedTab = page->_tabs.GetAt(selectedIdx);
-                    if (auto selectedTabImpl = _GetTabImpl(selectedTab))
+                    return;
+                }
+                auto tabImpl = _GetTabImpl(tabProj);
+                if (!tabImpl)
+                {
+                    return;
+                }
+
+                // Fresh picker for this click — no shared state, no stale handlers.
+                auto picker = winrt::make<ColorPickupFlyout>();
+                auto tabWeak = tabImpl->get_weak();
+                picker.ColorSelected([tabWeak](auto newTabColor) {
+                    if (auto t = tabWeak.get())
                     {
-                        if (!page->_tabColorPicker)
+                        t->SetRuntimeTabColor(newTabColor);
+                    }
+                });
+                picker.ColorCleared([tabWeak]() {
+                    if (auto t = tabWeak.get())
+                    {
+                        t->ResetRuntimeTabColor();
+                    }
+                });
+
+                if (auto g = gridWeak.get())
+                {
+                    picker.ShowAt(g);
+                }
+            });
+        }
+
+        // Entry [1] is "Rename tab". Re-wire it to use the sidebar's own inline
+        // TextBox (the top bar's renamer is on the hidden TabViewItem here).
+        if (auto renameItem = contextMenu.Items().GetAt(1).try_as<WUX::Controls::MenuFlyoutItem>())
+        {
+            auto textBlockWeak = winrt::make_weak(textBlock);
+            auto renameBoxWeak = winrt::make_weak(renameBox);
+            auto tabProj = tab;
+            // Guards against the LostFocus handler firing again after Enter/Escape
+            // already handled the commit/cancel (a TextBox hidden via Visibility
+            // still loses focus and would otherwise double-fire SetTabText).
+            auto committing = std::make_shared<bool>(false);
+
+            // Begin editing.
+            renameItem.Click([weakThis, textBlockWeak, renameBoxWeak, tabProj, committing](auto&&, auto&&) {
+                *committing = false;
+                if (auto page = weakThis.get())
+                {
+                    if (auto tb = textBlockWeak.get())
+                    {
+                        tb.Visibility(WUX::Visibility::Collapsed);
+                    }
+                    if (auto rb = renameBoxWeak.get())
+                    {
+                        auto tabImpl = _GetTabImpl(tabProj);
+                        const auto currentText = tabImpl ? tabImpl->GetTabText() : winrt::hstring{};
+                        rb.Text(currentText.empty() ? tabProj.Title() : currentText);
+                        rb.Visibility(WUX::Visibility::Visible);
+                        rb.Focus(WUX::FocusState::Programmatic);
+                        rb.SelectAll();
+                    }
+                }
+            });
+
+            // Commit on Enter, cancel on Escape.
+            renameBox.KeyDown([weakThis, textBlockWeak, renameBoxWeak, tabProj, committing](auto&&, const WUX::Input::KeyRoutedEventArgs& e) {
+                const auto key = e.OriginalKey();
+                if (key != Windows::System::VirtualKey::Enter && key != Windows::System::VirtualKey::Escape)
+                {
+                    return;
+                }
+                e.Handled(true);
+                *committing = true;
+                const auto commit = (key == Windows::System::VirtualKey::Enter);
+                if (auto page = weakThis.get())
+                {
+                    if (commit)
+                    {
+                        if (auto rb = renameBoxWeak.get())
                         {
-                            page->_tabColorPicker = winrt::make<ColorPickupFlyout>();
+                            if (auto tabImpl = _GetTabImpl(tabProj))
+                            {
+                                tabImpl->SetTabText(rb.Text());
+                            }
                         }
+                    }
+                    if (auto rb = renameBoxWeak.get())
+                    {
+                        rb.Visibility(WUX::Visibility::Collapsed);
+                    }
+                    if (auto tb = textBlockWeak.get())
+                    {
+                        tb.Visibility(WUX::Visibility::Visible);
+                    }
+                }
+            });
 
-                        // AttachColorPicker wires events and calls ShowAt(TabViewItem())
-                        // which is invisible in vertical mode — so we immediately re-show
-                        // on the sidebar grid item
-                        selectedTabImpl->AttachColorPicker(page->_tabColorPicker);
-                        page->_tabColorPicker.Hide();
-
-                        if (auto g = gridWeak.get())
+            // Commit on losing focus (e.g. user clicks elsewhere). Skipped when
+            // Enter/Escape already handled it.
+            renameBox.LostFocus([weakThis, textBlockWeak, renameBoxWeak, tabProj, committing](auto&&, auto&&) {
+                if (*committing)
+                {
+                    return;
+                }
+                *committing = true;
+                if (auto page = weakThis.get())
+                {
+                    if (auto rb = renameBoxWeak.get())
+                    {
+                        if (auto tabImpl = _GetTabImpl(tabProj))
                         {
-                            page->_tabColorPicker.ShowAt(g);
+                            tabImpl->SetTabText(rb.Text());
+                        }
+                        rb.Visibility(WUX::Visibility::Collapsed);
+                    }
+                    if (auto tb = textBlockWeak.get())
+                    {
+                        tb.Visibility(WUX::Visibility::Visible);
+                    }
+                }
+            });
+        }
+
+        // Entry [2] is "Duplicate tab". The top-bar handler (_HandleDuplicateTab)
+        // ignores the sender and duplicates the FOCUSED tab, which in the sidebar
+        // is the wrong tab (and races with the async focus switch, causing a
+        // hresult_error). Bind directly to the right-clicked tab instead.
+        if (auto dupItem = contextMenu.Items().GetAt(2).try_as<WUX::Controls::MenuFlyoutItem>())
+        {
+            auto tabProj = tab;
+            dupItem.Click([weakThis, tabProj](auto&&, auto&&) {
+                if (auto page = weakThis.get())
+                {
+                    if (auto tabImpl = _GetTabImpl(tabProj))
+                    {
+                        page->_DuplicateTab(*tabImpl);
+                    }
+                }
+            });
+        }
+
+        // Entry [3] is "Split tab". _HandleSplitPane derives duplicateFromTab from
+        // _GetFocusedTab() (not the sender), so on a non-focused sidebar tab it
+        // splits the right-clicked tab but duplicates the focused one, throwing.
+        // Bind both the split target and the duplicate source to the right-clicked tab.
+        if (auto splitItem = contextMenu.Items().GetAt(3).try_as<WUX::Controls::MenuFlyoutItem>())
+        {
+            auto tabProj = tab;
+            splitItem.Click([weakThis, tabProj](auto&&, auto&&) {
+                auto page = weakThis.get();
+                if (!page)
+                {
+                    return;
+                }
+                auto tabImpl = _GetTabImpl(tabProj);
+                if (!tabImpl)
+                {
+                    return;
+                }
+                auto newPane = page->_MakePane(nullptr, tabProj, nullptr);
+                page->_SplitPane(tabImpl, Microsoft::Terminal::Settings::Model::SplitDirection::Automatic, 0.5f, newPane);
+            });
+        }
+
+        // Refresh enable/disable state for index-dependent items (Close other,
+        // Close tabs after, Move left/right) right before the menu opens, since
+        // the sidebar's flyout is a separate instance from the top bar's and is
+        // not tracked by Tab::_EnableMenuItems. All lookups use try_as (not as)
+        // and guard every index, so a structural mismatch can never throw.
+        //
+        // CRITICAL: a right-click on a sidebar item does NOT change the
+        // selection (only a left-click SelectionChanged does). The top bar's
+        // handlers route actions via _GetFocusedTab(), which reads
+        // _tabView.SelectedItem. If we let the menu open on a non-focused item,
+        // the right-clicked tab (DoAction sender) and the focused tab diverge,
+        // which crashes SplitPane/MoveTab-to-new-window (hresult_error). So we
+        // first select the right-clicked tab, aligning sender with focus — same
+        // as the top bar where right-click implicitly selects the tab.
+        contextMenu.Opening([weakThis, index](auto&& sender, auto&&) {
+            auto flyout = sender.try_as<WUX::Controls::MenuFlyout>();
+            if (!flyout)
+            {
+                return;
+            }
+            auto page = weakThis.get();
+            if (!page)
+            {
+                return;
+            }
+            const auto numOfTabs = page->_tabs.Size();
+            if (index >= numOfTabs)
+            {
+                return;
+            }
+            // Select the right-clicked tab so _tabView.SelectedItem matches the
+            // tab this flyout belongs to. _SelectTab also syncs the sidebar's
+            // own SelectedIndex via the existing two-way sync.
+            page->_SelectTab(index);
+
+            const auto tabIndex = static_cast<int32_t>(index);
+            const auto lastIdx = numOfTabs - 1;
+            const auto uTab = index;
+
+            auto setEnabled = [](WUX::Controls::MenuFlyoutItemBase item, bool enabled) {
+                item.IsEnabled(enabled);
+            };
+
+            const auto items = flyout.Items();
+
+            // Move submenu is entry [4]; inner layout (see Tab::BuildContextMenu):
+            //   [0] move to new window  [1] move right  [2] move left
+            if (items.Size() > 4)
+            {
+                if (auto moveSubMenu = items.GetAt(4).try_as<WUX::Controls::MenuFlyoutSubItem>())
+                {
+                    const auto moveItems = moveSubMenu.Items();
+                    if (moveItems.Size() > 1)
+                    {
+                        if (auto it = moveItems.GetAt(1).try_as<WUX::Controls::MenuFlyoutItemBase>())
+                        {
+                            setEnabled(it, uTab < lastIdx); // move right
+                        }
+                    }
+                    if (moveItems.Size() > 2)
+                    {
+                        if (auto it = moveItems.GetAt(2).try_as<WUX::Controls::MenuFlyoutItemBase>())
+                        {
+                            setEnabled(it, tabIndex > 0); // move left
+                        }
+                    }
+                }
+            }
+
+            // Close submenu is entry [9]; inner layout:
+            //   [0] close tabs after  [1] close other tabs  [2] close pane
+            if (items.Size() > 9)
+            {
+                if (auto closeSubMenu = items.GetAt(9).try_as<WUX::Controls::MenuFlyoutSubItem>())
+                {
+                    const auto closeItems = closeSubMenu.Items();
+                    if (closeItems.Size() > 0)
+                    {
+                        if (auto it = closeItems.GetAt(0).try_as<WUX::Controls::MenuFlyoutItemBase>())
+                        {
+                            setEnabled(it, uTab < lastIdx); // close tabs after
+                        }
+                    }
+                    if (closeItems.Size() > 1)
+                    {
+                        if (auto it = closeItems.GetAt(1).try_as<WUX::Controls::MenuFlyoutItemBase>())
+                        {
+                            setEnabled(it, numOfTabs > 1); // close other tabs
                         }
                     }
                 }
             }
         });
-        contextMenu.Items().Append(colorMenuItem);
 
-        // Move Up menu item
-        auto moveUpItem = WUX::Controls::MenuFlyoutItem();
-        moveUpItem.Text(L"Move Up");
-        WUX::Controls::FontIcon upIcon;
-        upIcon.FontFamily(WUX::Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
-        upIcon.Glyph(L"\xE74A");
-        moveUpItem.Icon(upIcon);
-        moveUpItem.Click([weakThis](auto&&, auto&&) {
-            if (auto page = weakThis.get())
+        // Append the sidebar-specific Move Up / Move Down items (vertical
+        // semantics) after the full menu. These call _MoveTab with the
+        // right-clicked tab, which routes to _TryMoveTab — that re-syncs all
+        // three parallel collections (_tabs, _tabView.TabItems,
+        // _verticalTabListView.Items) and refreshes tab indices WITHOUT relying
+        // on a captured build-time index (the previous hand-written version
+        // captured `index`, which went stale after the first move and scrambled
+        // the order).
+        {
+            WUX::Controls::MenuFlyoutSeparator moveSep;
+            contextMenu.Items().Append(moveSep);
+
+            auto tabProj = tab;
+
+            // Move Up
+            auto moveUpItem = WUX::Controls::MenuFlyoutItem();
+            moveUpItem.Text(L"Move Up");
             {
-                auto selectedIdx = page->_verticalTabListView.SelectedIndex();
-                if (selectedIdx > 0 && selectedIdx < gsl::narrow_cast<int32_t>(page->_tabs.Size()))
-                {
-                    page->_rearranging = true;
-
-                    // Swap in the tab list
-                    auto tab = page->_tabs.GetAt(selectedIdx);
-                    page->_tabs.RemoveAt(selectedIdx);
-                    page->_tabs.InsertAt(selectedIdx - 1, tab);
-
-                    // Swap in the TabView (horizontal, keeps content pane mapping correct)
-                    auto tabViewItem = tab.TabViewItem();
-                    uint32_t tvIdx = 0;
-                    if (page->_tabView.TabItems().IndexOf(tabViewItem, tvIdx) && tvIdx > 0)
-                    {
-                        page->_tabView.TabItems().RemoveAt(tvIdx);
-                        page->_tabView.TabItems().InsertAt(tvIdx - 1, tabViewItem);
-                    }
-
-                    // Swap in the sidebar ListView
-                    auto items = page->_verticalTabListView.Items();
-                    auto item = items.GetAt(selectedIdx);
-                    items.RemoveAt(selectedIdx);
-                    items.InsertAt(selectedIdx - 1, item);
-
-                    page->_verticalTabListView.SelectedIndex(selectedIdx - 1);
-                    page->_rearranging = false;
-                }
+                WUX::Controls::FontIcon upIcon;
+                upIcon.FontFamily(WUX::Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+                upIcon.Glyph(L"\xE74A");
+                moveUpItem.Icon(upIcon);
             }
-        });
-        contextMenu.Items().Append(moveUpItem);
+            moveUpItem.Click([weakThis, tabProj](auto&&, auto&&) {
+                if (auto page = weakThis.get())
+                {
+                    if (auto tabImpl = _GetTabImpl(tabProj))
+                    {
+                        Microsoft::Terminal::Settings::Model::MoveTabArgs args{ hstring{}, Microsoft::Terminal::Settings::Model::MoveTabDirection::Backward };
+                        page->_MoveTab(tabImpl, args);
+                    }
+                }
+            });
+            contextMenu.Items().Append(moveUpItem);
 
-        // Move Down menu item
-        auto moveDownItem = WUX::Controls::MenuFlyoutItem();
-        moveDownItem.Text(L"Move Down");
-        WUX::Controls::FontIcon downIcon;
-        downIcon.FontFamily(WUX::Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
-        downIcon.Glyph(L"\xE74B");
-        moveDownItem.Icon(downIcon);
-        moveDownItem.Click([weakThis](auto&&, auto&&) {
-            if (auto page = weakThis.get())
+            // Move Down
+            auto moveDownItem = WUX::Controls::MenuFlyoutItem();
+            moveDownItem.Text(L"Move Down");
             {
-                auto selectedIdx = page->_verticalTabListView.SelectedIndex();
-                if (selectedIdx >= 0 && selectedIdx < gsl::narrow_cast<int32_t>(page->_tabs.Size()) - 1)
-                {
-                    page->_rearranging = true;
-
-                    // Swap in the tab list
-                    auto tab = page->_tabs.GetAt(selectedIdx);
-                    page->_tabs.RemoveAt(selectedIdx);
-                    page->_tabs.InsertAt(selectedIdx + 1, tab);
-
-                    // Swap in the TabView (horizontal, keeps content pane mapping correct)
-                    auto tabViewItem = tab.TabViewItem();
-                    uint32_t tvIdx = 0;
-                    if (page->_tabView.TabItems().IndexOf(tabViewItem, tvIdx) && tvIdx < page->_tabView.TabItems().Size() - 1)
-                    {
-                        page->_tabView.TabItems().RemoveAt(tvIdx);
-                        page->_tabView.TabItems().InsertAt(tvIdx + 1, tabViewItem);
-                    }
-
-                    // Swap in the sidebar ListView
-                    auto items = page->_verticalTabListView.Items();
-                    auto item = items.GetAt(selectedIdx);
-                    items.RemoveAt(selectedIdx);
-                    items.InsertAt(selectedIdx + 1, item);
-
-                    page->_verticalTabListView.SelectedIndex(selectedIdx + 1);
-                    page->_rearranging = false;
-                }
+                WUX::Controls::FontIcon downIcon;
+                downIcon.FontFamily(WUX::Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+                downIcon.Glyph(L"\xE74B");
+                moveDownItem.Icon(downIcon);
             }
-        });
-        contextMenu.Items().Append(moveDownItem);
+            moveDownItem.Click([weakThis, tabProj](auto&&, auto&&) {
+                if (auto page = weakThis.get())
+                {
+                    if (auto tabImpl = _GetTabImpl(tabProj))
+                    {
+                        Microsoft::Terminal::Settings::Model::MoveTabArgs args{ hstring{}, Microsoft::Terminal::Settings::Model::MoveTabDirection::Forward };
+                        page->_MoveTab(tabImpl, args);
+                    }
+                }
+            });
+            contextMenu.Items().Append(moveDownItem);
+        }
 
         grid.ContextFlyout(contextMenu);
+        } // end if (tabImpl)
 
         _verticalTabListView.Items().InsertAt(index, grid);
 
@@ -6500,14 +6747,24 @@ namespace winrt::TerminalApp::implementation
                         {
                             if (auto tb = child.try_as<WUX::Controls::TextBlock>())
                             {
-                                // Use profile name if available, else tab title
+                                // Prefer a user-set custom name, then profile
+                                // name, then the live tab title. This matches the
+                                // initial display logic so a rename sticks.
                                 winrt::hstring title = t.Title();
                                 if (auto tImpl = _GetTabImpl(t))
                                 {
-                                    auto prof = tImpl->GetFocusedProfile();
-                                    if (prof && !prof.Name().empty())
+                                    const auto customName = tImpl->GetTabText();
+                                    if (!customName.empty())
                                     {
-                                        title = prof.Name();
+                                        title = customName;
+                                    }
+                                    else
+                                    {
+                                        auto prof = tImpl->GetFocusedProfile();
+                                        if (prof && !prof.Name().empty())
+                                        {
+                                            title = prof.Name();
+                                        }
                                     }
                                 }
                                 tb.Text(title);

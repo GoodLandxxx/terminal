@@ -104,6 +104,14 @@ namespace winrt::TerminalApp::implementation
         void UpdateTabViewIndex(const uint32_t idx, const uint32_t numTabs);
         void SetActionMap(const Microsoft::Terminal::Settings::Model::IActionMapView& actionMap);
 
+        // Build a fresh context menu flyout for this tab. The top tab bar and the
+        // vertical sidebar each call this so their right-click menus stay aligned
+        // without duplicating the construction logic. Each call returns a new
+        // MenuFlyout with its own MenuFlyoutItem instances (a MenuFlyoutItem can
+        // only belong to one flyout, so the two locations must hold separate
+        // instances built from the same logic).
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout BuildContextMenu();
+
         void ThemeColor(const winrt::Microsoft::Terminal::Settings::Model::ThemeColor& focused,
                         const winrt::Microsoft::Terminal::Settings::Model::ThemeColor& unfocused,
                         const til::color& tabRowColor);

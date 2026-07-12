@@ -822,6 +822,20 @@ namespace winrt::TerminalApp::implementation
 
         auto weakThis{ get_weak() };
 
+        // If a picker is already attached (e.g. the sidebar reuses the shared
+        // _tabColorPicker across tabs/right-clicks), revoke the previously
+        // registered handlers first. Otherwise the Closed handler below would
+        // accumulate across attaches, and revoking a stale token against a
+        // destroyed/empty flyout dereferences a null ABI pointer (read access
+        // violation). The top tab bar only attaches once, so this is a no-op
+        // there.
+        if (_tabColorPickup)
+        {
+            _tabColorPickup.ColorSelected(_colorSelectedToken);
+            _tabColorPickup.ColorCleared(_colorClearedToken);
+            _tabColorPickup.Closed(_pickerClosedToken);
+        }
+
         _tabColorPickup = colorPicker;
 
         _colorSelectedToken = _tabColorPickup.ColorSelected([weakThis](auto newTabColor) {
@@ -841,6 +855,12 @@ namespace winrt::TerminalApp::implementation
         _pickerClosedToken = _tabColorPickup.Closed([weakThis](auto&&, auto&&) {
             if (auto tab{ weakThis.get() })
             {
+                // Guard: another attach (or a prior Closed) may have already
+                // cleared _tabColorPickup. Never call methods on a null flyout.
+                if (!tab->_tabColorPickup)
+                {
+                    return;
+                }
                 tab->_tabColorPickup.ColorSelected(tab->_colorSelectedToken);
                 tab->_tabColorPickup.ColorCleared(tab->_colorClearedToken);
                 tab->_tabColorPickup.Closed(tab->_pickerClosedToken);
@@ -1667,6 +1687,297 @@ namespace winrt::TerminalApp::implementation
         flyout.Items().Append(closeTabMenuItem);
 
         return closeSubMenu;
+    }
+
+    // Method Description:
+    // - Builds a fresh context menu flyout for this tab. Each call returns a new
+    //   MenuFlyout with its own MenuFlyoutItem instances. The top tab bar and the
+    //   vertical sidebar both build their right-click menus from this same logic
+    //   (a MenuFlyoutItem can only belong to one flyout, so each location holds a
+    //   separate instance built here). This version uses local items only and
+    //   does not touch the Tab's cached menu-item member fields, so calling it
+    //   from the sidebar never disturbs the top tab bar's menu state.
+    // Arguments:
+    // - <none>
+    // Return Value:
+    // - the constructed MenuFlyout.
+    winrt::Windows::UI::Xaml::Controls::MenuFlyout Tab::BuildContextMenu()
+    {
+        auto weakThis{ get_weak() };
+
+        Controls::MenuFlyout contextMenuFlyout;
+
+        // "Change tab color..."
+        Controls::MenuFlyoutItem chooseColorMenuItem;
+        {
+            Controls::FontIcon colorPickSymbol;
+            colorPickSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            colorPickSymbol.Glyph(L"\xE790");
+
+            chooseColorMenuItem.Click({ get_weak(), &Tab::_chooseColorClicked });
+            chooseColorMenuItem.Text(RS_(L"TabColorChoose"));
+            chooseColorMenuItem.Icon(colorPickSymbol);
+
+            const auto chooseColorToolTip = RS_(L"ChooseColorToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(chooseColorMenuItem, box_value(chooseColorToolTip));
+            Automation::AutomationProperties::SetHelpText(chooseColorMenuItem, chooseColorToolTip);
+        }
+
+        // "Rename tab"
+        Controls::MenuFlyoutItem renameTabMenuItem;
+        {
+            Controls::FontIcon renameTabSymbol;
+            renameTabSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            renameTabSymbol.Glyph(L"\xE8AC"); // Rename
+
+            renameTabMenuItem.Click({ get_weak(), &Tab::_renameTabClicked });
+            renameTabMenuItem.Text(RS_(L"RenameTabText"));
+            renameTabMenuItem.Icon(renameTabSymbol);
+
+            const auto renameTabToolTip = RS_(L"RenameTabToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(renameTabMenuItem, box_value(renameTabToolTip));
+            Automation::AutomationProperties::SetHelpText(renameTabMenuItem, renameTabToolTip);
+        }
+
+        // "Duplicate tab"
+        Controls::MenuFlyoutItem duplicateTabMenuItem;
+        {
+            Controls::FontIcon duplicateTabSymbol;
+            duplicateTabSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            duplicateTabSymbol.Glyph(L"\xF5ED");
+
+            duplicateTabMenuItem.Click({ get_weak(), &Tab::_duplicateTabClicked });
+            duplicateTabMenuItem.Text(RS_(L"DuplicateTabText"));
+            duplicateTabMenuItem.Icon(duplicateTabSymbol);
+
+            const auto duplicateTabToolTip = RS_(L"DuplicateTabToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(duplicateTabMenuItem, box_value(duplicateTabToolTip));
+            Automation::AutomationProperties::SetHelpText(duplicateTabMenuItem, duplicateTabToolTip);
+        }
+
+        // "Split tab"
+        Controls::MenuFlyoutItem splitTabMenuItem;
+        {
+            Controls::FontIcon splitTabSymbol;
+            splitTabSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            splitTabSymbol.Glyph(L"\xF246"); // ViewDashboard
+
+            splitTabMenuItem.Click({ get_weak(), &Tab::_splitTabClicked });
+            splitTabMenuItem.Text(RS_(L"SplitTabText"));
+            splitTabMenuItem.Icon(splitTabSymbol);
+
+            const auto splitTabToolTip = RS_(L"SplitTabToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(splitTabMenuItem, box_value(splitTabToolTip));
+            Automation::AutomationProperties::SetHelpText(splitTabMenuItem, splitTabToolTip);
+        }
+
+        // "Move" submenu (move to new window / right / left)
+        Controls::MenuFlyoutSubItem moveSubMenu;
+        {
+            moveSubMenu.Text(RS_(L"TabMoveSubMenu"));
+
+            Controls::MenuFlyoutItem moveToNewWindowMenuItem;
+            {
+                Controls::FontIcon moveTabToNewWindowTabSymbol;
+                moveTabToNewWindowTabSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+                moveTabToNewWindowTabSymbol.Glyph(L"\xE8A7");
+
+                moveToNewWindowMenuItem.Click([weakThis](auto&&, auto&&) {
+                    if (auto tab{ weakThis.get() })
+                    {
+                        MoveTabArgs args{ L"new", MoveTabDirection::Forward };
+                        ActionAndArgs actionAndArgs{ ShortcutAction::MoveTab, args };
+                        tab->_dispatch.DoAction(*tab, actionAndArgs);
+                    }
+                });
+                moveToNewWindowMenuItem.Text(RS_(L"MoveTabToNewWindowText"));
+                moveToNewWindowMenuItem.Icon(moveTabToNewWindowTabSymbol);
+
+                const auto moveTabToNewWindowToolTip = RS_(L"MoveTabToNewWindowToolTip");
+                WUX::Controls::ToolTipService::SetToolTip(moveToNewWindowMenuItem, box_value(moveTabToNewWindowToolTip));
+                Automation::AutomationProperties::SetHelpText(moveToNewWindowMenuItem, moveTabToNewWindowToolTip);
+
+                moveSubMenu.Items().Append(moveToNewWindowMenuItem);
+            }
+
+            Controls::MenuFlyoutItem moveRightMenuItem;
+            moveRightMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    MoveTabArgs args{ hstring{}, MoveTabDirection::Forward };
+                    ActionAndArgs actionAndArgs{ ShortcutAction::MoveTab, args };
+                    tab->_dispatch.DoAction(*tab, actionAndArgs);
+                }
+            });
+            moveRightMenuItem.Text(RS_(L"TabMoveRight"));
+            moveSubMenu.Items().Append(moveRightMenuItem);
+
+            Controls::MenuFlyoutItem moveLeftMenuItem;
+            moveLeftMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    MoveTabArgs args{ hstring{}, MoveTabDirection::Backward };
+                    ActionAndArgs actionAndArgs{ ShortcutAction::MoveTab, args };
+                    tab->_dispatch.DoAction(*tab, actionAndArgs);
+                }
+            });
+            moveLeftMenuItem.Text(RS_(L"TabMoveLeft"));
+            moveSubMenu.Items().Append(moveLeftMenuItem);
+        }
+
+        // "Export tab"
+        Controls::MenuFlyoutItem exportTabMenuItem;
+        {
+            Controls::FontIcon exportTabSymbol;
+            exportTabSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            exportTabSymbol.Glyph(L"\xE74E"); // Save
+
+            exportTabMenuItem.Click({ get_weak(), &Tab::_exportTextClicked });
+            exportTabMenuItem.Text(RS_(L"ExportTabText"));
+            exportTabMenuItem.Icon(exportTabSymbol);
+
+            const auto exportTabToolTip = RS_(L"ExportTabToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(exportTabMenuItem, box_value(exportTabToolTip));
+            Automation::AutomationProperties::SetHelpText(exportTabMenuItem, exportTabToolTip);
+        }
+
+        // "Find"
+        Controls::MenuFlyoutItem findMenuItem;
+        {
+            Controls::FontIcon findSymbol;
+            findSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            findSymbol.Glyph(L"\xF78B"); // SearchMedium
+
+            findMenuItem.Click({ get_weak(), &Tab::_findClicked });
+            findMenuItem.Text(RS_(L"FindText"));
+            findMenuItem.Icon(findSymbol);
+
+            const auto findToolTip = RS_(L"FindToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(findMenuItem, box_value(findToolTip));
+            Automation::AutomationProperties::SetHelpText(findMenuItem, findToolTip);
+        }
+
+        // "Restart session"
+        Controls::MenuFlyoutItem restartConnectionMenuItem;
+        {
+            Controls::FontIcon restartConnectionSymbol;
+            restartConnectionSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            restartConnectionSymbol.Glyph(L"\xE72C");
+
+            restartConnectionMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    tab->_RestartActivePaneConnection();
+                }
+            });
+            restartConnectionMenuItem.Text(RS_(L"RestartConnectionText"));
+            restartConnectionMenuItem.Icon(restartConnectionSymbol);
+
+            const auto restartConnectionToolTip = RS_(L"RestartConnectionToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(restartConnectionMenuItem, box_value(restartConnectionToolTip));
+            Automation::AutomationProperties::SetHelpText(restartConnectionMenuItem, restartConnectionToolTip);
+        }
+
+        // "Close pane"
+        Controls::MenuFlyoutItem closePaneMenuItem;
+        {
+            closePaneMenuItem.Click({ get_weak(), &Tab::_closePaneClicked });
+            closePaneMenuItem.Text(RS_(L"ClosePaneText"));
+
+            const auto closePaneToolTip = RS_(L"ClosePaneToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(closePaneMenuItem, box_value(closePaneToolTip));
+            Automation::AutomationProperties::SetHelpText(closePaneMenuItem, closePaneToolTip);
+        }
+
+        // "Close" submenu (close tabs after / close other tabs / close) with close pane appended.
+        Controls::MenuFlyoutSubItem closeSubMenu;
+        {
+            closeSubMenu.Text(RS_(L"TabCloseSubMenu"));
+
+            Controls::MenuFlyoutItem closeTabsAfterMenuItem;
+            closeTabsAfterMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    CloseTabsAfterArgs args{ tab->_TabViewIndex };
+                    ActionAndArgs closeTabsAfter{ ShortcutAction::CloseTabsAfter, args };
+                    tab->_dispatch.DoAction(*tab, closeTabsAfter);
+                }
+            });
+            closeTabsAfterMenuItem.Text(RS_(L"TabCloseAfter"));
+            {
+                const auto closeTabsAfterToolTip = RS_(L"TabCloseAfterToolTip");
+                WUX::Controls::ToolTipService::SetToolTip(closeTabsAfterMenuItem, box_value(closeTabsAfterToolTip));
+                Automation::AutomationProperties::SetHelpText(closeTabsAfterMenuItem, closeTabsAfterToolTip);
+            }
+            closeSubMenu.Items().Append(closeTabsAfterMenuItem);
+
+            Controls::MenuFlyoutItem closeOtherTabsMenuItem;
+            closeOtherTabsMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    CloseOtherTabsArgs args{ tab->_TabViewIndex };
+                    ActionAndArgs closeOtherTabs{ ShortcutAction::CloseOtherTabs, args };
+                    tab->_dispatch.DoAction(*tab, closeOtherTabs);
+                }
+            });
+            closeOtherTabsMenuItem.Text(RS_(L"TabCloseOther"));
+            {
+                const auto closeOtherTabsToolTip = RS_(L"TabCloseOtherToolTip");
+                WUX::Controls::ToolTipService::SetToolTip(closeOtherTabsMenuItem, box_value(closeOtherTabsToolTip));
+                Automation::AutomationProperties::SetHelpText(closeOtherTabsMenuItem, closeOtherTabsToolTip);
+            }
+            closeSubMenu.Items().Append(closeOtherTabsMenuItem);
+
+            closeSubMenu.Items().Append(closePaneMenuItem);
+        }
+
+        Controls::MenuFlyoutItem closeTabMenuItem;
+        {
+            Controls::FontIcon closeSymbol;
+            closeSymbol.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            closeSymbol.Glyph(L"\xE711");
+
+            closeTabMenuItem.Click([weakThis](auto&&, auto&&) {
+                if (auto tab{ weakThis.get() })
+                {
+                    tab->CloseRequested.raise(nullptr, nullptr);
+                }
+            });
+            closeTabMenuItem.Text(RS_(L"TabClose"));
+            closeTabMenuItem.Icon(closeSymbol);
+
+            const auto closeTabToolTip = RS_(L"TabCloseToolTip");
+
+            WUX::Controls::ToolTipService::SetToolTip(closeTabMenuItem, box_value(closeTabToolTip));
+            Automation::AutomationProperties::SetHelpText(closeTabMenuItem, closeTabToolTip);
+        }
+
+        // Build the menu. Order is load-bearing: the unit test
+        // (VerifyTabContextMenuStructure) pins this layout, and the sidebar's
+        // enable/disable refresh relies on Move being entry [4] and Close being
+        // entry [9].
+        Controls::MenuFlyoutSeparator menuSeparator;
+        contextMenuFlyout.Items().Append(chooseColorMenuItem);
+        contextMenuFlyout.Items().Append(renameTabMenuItem);
+        contextMenuFlyout.Items().Append(duplicateTabMenuItem);
+        contextMenuFlyout.Items().Append(splitTabMenuItem);
+        contextMenuFlyout.Items().Append(moveSubMenu);
+        contextMenuFlyout.Items().Append(exportTabMenuItem);
+        contextMenuFlyout.Items().Append(findMenuItem);
+        contextMenuFlyout.Items().Append(restartConnectionMenuItem);
+        contextMenuFlyout.Items().Append(menuSeparator);
+        contextMenuFlyout.Items().Append(closeSubMenu);
+        contextMenuFlyout.Items().Append(closeTabMenuItem);
+
+        return contextMenuFlyout;
     }
 
     // Method Description:
