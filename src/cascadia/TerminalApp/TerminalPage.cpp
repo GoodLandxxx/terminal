@@ -22,6 +22,7 @@
 #include "SettingsPaneContent.h"
 #include "SnippetsPaneContent.h"
 #include "ColorPickupFlyout.h"
+#include "TabHeaderControl.h"
 #include "TabRowControl.h"
 #include "TerminalSettingsCache.h"
 
@@ -6215,29 +6216,31 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
-        // Build a Grid: [ColorBar (4px) | Spinner (Auto) | Title (*) | Close (Auto)]
+        // Build a Grid: [ColorBar (4px) | HeaderControl (*) | Close (Auto)].
+        // The middle column hosts a TabHeaderControl — the same UserControl the
+        // top tab bar uses — so the sidebar gets the title, progress ring and all
+        // five status indicators (bell / zoom / read-only / connection-closed /
+        // broadcast) for free, driven by the same TabStatus object. Sidebar-only
+        // pieces (color bar, whole-row tint, close button) stay outside it.
         auto grid = WUX::Controls::Grid();
 
         WUX::Controls::ColumnDefinition colorCol;
         colorCol.Width(WUX::GridLengthHelper::FromPixels(4));
-        WUX::Controls::ColumnDefinition spinnerCol;
-        spinnerCol.Width(WUX::GridLengthHelper::Auto());
-        WUX::Controls::ColumnDefinition titleCol;
-        titleCol.Width(WUX::GridLengthHelper::FromValueAndType(1, WUX::GridUnitType::Star));
+        WUX::Controls::ColumnDefinition headerCol;
+        headerCol.Width(WUX::GridLengthHelper::FromValueAndType(1, WUX::GridUnitType::Star));
         WUX::Controls::ColumnDefinition closeCol;
         closeCol.Width(WUX::GridLengthHelper::Auto());
         grid.ColumnDefinitions().Append(colorCol);
-        grid.ColumnDefinitions().Append(spinnerCol);
-        grid.ColumnDefinitions().Append(titleCol);
+        grid.ColumnDefinitions().Append(headerCol);
         grid.ColumnDefinitions().Append(closeCol);
 
         // 背景层:填满整行的半透明着色。在新 WinUI 下 grid.Background 不会被
         // ListViewItem 渲染,改用 Grid 内部的底层 Border 承载整行染色。
-        // 必须作为 grid 的第一个 child(画在最底层),横跨所有 4 列。
+        // 必须作为 grid 的第一个 child(画在最底层),横跨所有 3 列。
         auto bgBorder = WUX::Controls::Border();
         bgBorder.Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
         WUX::Controls::Grid::SetColumn(bgBorder, 0);
-        WUX::Controls::Grid::SetColumnSpan(bgBorder, 4);
+        WUX::Controls::Grid::SetColumnSpan(bgBorder, 3);
         grid.Children().Append(bgBorder);
         auto bgBorderWeak = winrt::make_weak(bgBorder);
 
@@ -6267,34 +6270,10 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        // Progress spinner
-        Microsoft::UI::Xaml::Controls::ProgressRing spinner;
-        spinner.Width(14);
-        spinner.Height(14);
-        spinner.Margin(WUX::ThicknessHelper::FromLengths(0, 0, 4, 0));
-        spinner.IsActive(false);
-        spinner.Visibility(WUX::Visibility::Collapsed);
-        spinner.VerticalAlignment(WUX::VerticalAlignment::Center);
-        WUX::Controls::Grid::SetColumn(spinner, 1);
-        grid.Children().Append(spinner);
-
-        // Update spinner from tab's current status
-        if (tabImpl)
-        {
-            auto status = tabImpl->TabStatus();
-            if (status.IsProgressRingActive())
-            {
-                spinner.IsActive(true);
-                spinner.IsIndeterminate(status.IsProgressRingIndeterminate());
-                spinner.Visibility(WUX::Visibility::Visible);
-            }
-        }
-
         // Title — mirror the top tab bar exactly: a user-set custom name
         // (GetTabText) wins, otherwise the live control title (tab.Title()),
         // which follows the shell's real-time title. Never fall back to the
         // profile name, or the sidebar diverges from the top tab bar.
-        auto textBlock = WUX::Controls::TextBlock();
         winrt::hstring displayTitle = tab.Title();
         if (tabImpl)
         {
@@ -6304,26 +6283,20 @@ namespace winrt::TerminalApp::implementation
                 displayTitle = customName;
             }
         }
-        textBlock.Text(displayTitle);
-        textBlock.TextTrimming(WUX::TextTrimming::CharacterEllipsis);
-        textBlock.VerticalAlignment(WUX::VerticalAlignment::Center);
-        WUX::Controls::Grid::SetColumn(textBlock, 2);
-        grid.Children().Append(textBlock);
 
-        // Inline rename TextBox (collapsed by default). The top bar's renamer
-        // lives on the hidden TabViewItem in vertical mode, so the sidebar needs
-        // its own visible TextBox. On commit it calls SetTabText (same backend as
-        // the top bar), which fires Title PropertyChanged and the sidebar's
-        // existing handler refreshes this TextBlock.
-        auto renameBox = WUX::Controls::TextBox();
-        renameBox.Text(displayTitle);
-        renameBox.Visibility(WUX::Visibility::Collapsed);
-        renameBox.VerticalAlignment(WUX::VerticalAlignment::Center);
-        renameBox.BorderThickness(WUX::ThicknessHelper::FromUniformLength(0));
-        renameBox.AcceptsReturn(false);
-        renameBox.Padding(WUX::ThicknessHelper::FromUniformLength(2));
-        WUX::Controls::Grid::SetColumn(renameBox, 2);
-        grid.Children().Append(renameBox);
+        // Header control — same control the top tab bar uses. Feeding it the
+        // tab's TabStatus makes the progress ring + all status indicators
+        // self-refreshing (x:Bind inside the UserControl). Title is pushed here
+        // and again from the Title PropertyChanged handler below.
+        winrt::TerminalApp::TabHeaderControl headerControl;
+        headerControl.Title(displayTitle);
+        if (tabImpl)
+        {
+            headerControl.TabStatus(tabImpl->TabStatus());
+        }
+        headerControl.VerticalAlignment(WUX::VerticalAlignment::Center);
+        WUX::Controls::Grid::SetColumn(headerControl, 1);
+        grid.Children().Append(headerControl);
 
         // Close button
         auto closeBtn = WUX::Controls::Button();
@@ -6338,7 +6311,7 @@ namespace winrt::TerminalApp::implementation
         closeBtn.VerticalAlignment(WUX::VerticalAlignment::Center);
         closeBtn.Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
         closeBtn.BorderThickness(WUX::ThicknessHelper::FromUniformLength(0));
-        WUX::Controls::Grid::SetColumn(closeBtn, 3);
+        WUX::Controls::Grid::SetColumn(closeBtn, 2);
 
         auto weakThis = get_weak();
 
@@ -6449,85 +6422,34 @@ namespace winrt::TerminalApp::implementation
         //   box not being cleared/closed on commit).
         if (auto renameItem = contextMenu.Items().GetAt(1).try_as<WUX::Controls::MenuFlyoutItem>())
         {
-            auto textBlockWeak = winrt::make_weak(textBlock);
-            auto renameBoxWeak = winrt::make_weak(renameBox);
+            auto headerControlWeak = winrt::make_weak(headerControl);
             auto tabProj = tab;
 
-            // Helper to close the box cleanly: hide box, show textblock, clear text.
-            auto closeBox = [textBlockWeak, renameBoxWeak]() {
-                if (auto rb = renameBoxWeak.get())
-                {
-                    rb.Visibility(WUX::Visibility::Collapsed);
-                    rb.Text(L"");
-                }
-                if (auto tb = textBlockWeak.get())
-                {
-                    tb.Visibility(WUX::Visibility::Visible);
-                }
-            };
-
-            // Begin editing.
-            renameItem.Click([weakThis, textBlockWeak, renameBoxWeak, tabProj](auto&&, auto&&) {
+            headerControl.TitleChangeRequested([weakThis, tabProj](winrt::hstring title) {
                 if (auto page = weakThis.get())
                 {
-                    if (auto tb = textBlockWeak.get())
+                    if (auto tabImpl = _GetTabImpl(tabProj))
                     {
-                        tb.Visibility(WUX::Visibility::Collapsed);
-                    }
-                    if (auto rb = renameBoxWeak.get())
-                    {
-                        auto tabImpl = _GetTabImpl(tabProj);
-                        const auto currentText = tabImpl ? tabImpl->GetTabText() : winrt::hstring{};
-                        rb.Text(currentText.empty() ? tabProj.Title() : currentText);
-                        rb.Visibility(WUX::Visibility::Visible);
-                        // Defer focus to the next layout pass. Setting focus
-                        // synchronously here races with the context-flyout
-                        // closing and immediately blurs the box (the old "flash
-                        // and vanish" bug). One frame later the flyout is gone
-                        // and focus sticks.
-                        auto rbWeak = winrt::make_weak(rb);
-                        if (auto dq = winrt::Windows::System::DispatcherQueue::GetForCurrentThread())
-                        {
-                            dq.TryEnqueue([rbWeak]() {
-                                if (auto rb = rbWeak.get())
-                                {
-                                    rb.Focus(WUX::FocusState::Programmatic);
-                                    rb.SelectAll();
-                                }
-                            });
-                        }
+                        tabImpl->SetTabText(title);
                     }
                 }
             });
 
-            // Enter commits, Escape cancels. Renaming closes ONLY on explicit
-            // Enter/Escape — we do NOT wire LostFocus. The sidebar ListView/flyout
-            // context makes the box lose focus unpredictably, and a LostFocus
-            // handler risked re-introducing the "flash and vanish" bug. The
-            // deferred focus below keeps the box focused for typing; on close,
-            // closeBox clears the text and restores the TextBlock so nothing
-            // stale remains (which was the cause of the earlier garbled text).
-            renameBox.KeyDown([weakThis, renameBoxWeak, tabProj, closeBox](auto&&, const WUX::Input::KeyRoutedEventArgs& e) {
-                const auto key = e.OriginalKey();
-                if (key != Windows::System::VirtualKey::Enter && key != Windows::System::VirtualKey::Escape)
+            // Begin editing. Defer one frame: the context flyout is still closing
+            // when this click fires, and calling BeginRename synchronously loses
+            // focus back to the closing flyout (the old "flash and vanish"). One
+            // frame later the flyout is gone and the renamer keeps focus.
+            renameItem.Click([headerControlWeak](auto&&, auto&&) {
+                if (auto dq = winrt::Windows::System::DispatcherQueue::GetForCurrentThread())
                 {
-                    return;
-                }
-                e.Handled(true);
-                if (key == Windows::System::VirtualKey::Enter)
-                {
-                    if (auto page = weakThis.get())
-                    {
-                        if (auto rb = renameBoxWeak.get())
+                    auto hcWeak2 = headerControlWeak;
+                    dq.TryEnqueue([hcWeak2]() {
+                        if (auto hc = hcWeak2.get())
                         {
-                            if (auto tabImpl = _GetTabImpl(tabProj))
-                            {
-                                tabImpl->SetTabText(rb.Text());
-                            }
+                            hc.BeginRename();
                         }
-                    }
+                    });
                 }
-                closeBox();
             });
         }
 
@@ -6768,7 +6690,7 @@ namespace winrt::TerminalApp::implementation
                 {
                     for (auto&& child : itemGrid.Children())
                     {
-                        if (auto tb = child.try_as<WUX::Controls::TextBlock>())
+                        if (auto hc = child.try_as<winrt::TerminalApp::TabHeaderControl>())
                         {
                             // Mirror the top tab bar: custom name wins, else the
                             // live control title. No profile-name fallback.
@@ -6781,7 +6703,7 @@ namespace winrt::TerminalApp::implementation
                                     title = customName;
                                 }
                             }
-                            tb.Text(title);
+                            hc.Title(title);
                             break;
                         }
                     }
@@ -6789,50 +6711,24 @@ namespace winrt::TerminalApp::implementation
             }
         });
 
-        // Listen to TabStatus changes for spinner and color
+        // Listen to TabStatus changes for the color indicator only. The progress
+        // ring and all status icons live inside the TabHeaderControl now and
+        // refresh themselves via x:Bind on the shared TabStatus, so we no longer
+        // track them here. The color bar / row tint are sidebar-only, so they
+        // still need a manual refresh on TabColorIndicator changes.
         if (tabImpl)
         {
             auto status = tabImpl->TabStatus();
-            auto spinnerWeak = winrt::make_weak(spinner);
             auto colorBarWeak = winrt::make_weak(colorBar);
 
-            status.PropertyChanged([weakThis, spinnerWeak, colorBarWeak, bgBorderWeak](auto&&, const WUX::Data::PropertyChangedEventArgs& args) {
+            status.PropertyChanged([weakThis, colorBarWeak, bgBorderWeak](auto&&, const WUX::Data::PropertyChangedEventArgs& args) {
                 auto page = weakThis.get();
                 if (!page)
                     return;
 
                 const auto propName = args.PropertyName();
 
-                if (propName == L"IsProgressRingActive" || propName == L"IsProgressRingIndeterminate")
-                {
-                    if (auto sp = spinnerWeak.get())
-                    {
-                        // Find which tab this belongs to and get its status
-                        auto items = page->_verticalTabListView.Items();
-                        for (uint32_t i = 0; i < page->_tabs.Size() && i < items.Size(); i++)
-                        {
-                            if (auto itemGrid = items.GetAt(i).try_as<WUX::Controls::Grid>())
-                            {
-                                for (auto&& child : itemGrid.Children())
-                                {
-                                    if (child.try_as<Microsoft::UI::Xaml::Controls::ProgressRing>() == sp)
-                                    {
-                                        auto t = page->_tabs.GetAt(i);
-                                        if (auto tImpl = _GetTabImpl(t))
-                                        {
-                                            auto st = tImpl->TabStatus();
-                                            sp.IsActive(st.IsProgressRingActive());
-                                            sp.IsIndeterminate(st.IsProgressRingIndeterminate());
-                                            sp.Visibility(st.IsProgressRingActive() ? WUX::Visibility::Visible : WUX::Visibility::Collapsed);
-                                        }
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                else if (propName == L"TabColorIndicator")
+                if (propName == L"TabColorIndicator")
                 {
                     if (auto cb = colorBarWeak.get())
                     {
@@ -6898,9 +6794,9 @@ namespace winrt::TerminalApp::implementation
             {
                 for (auto&& child : itemGrid.Children())
                 {
-                    if (auto tb = child.try_as<WUX::Controls::TextBlock>())
+                    if (auto hc = child.try_as<winrt::TerminalApp::TabHeaderControl>())
                     {
-                        tb.Text(title);
+                        hc.Title(title);
                         break;
                     }
                 }
