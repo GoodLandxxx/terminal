@@ -6290,9 +6290,10 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
-        // Title — prefer a user-set custom name (GetTabText), then the profile
-        // name, then the live tab title. The previous version always preferred
-        // the profile name, which silently overwrote a rename the user just typed.
+        // Title — mirror the top tab bar exactly: a user-set custom name
+        // (GetTabText) wins, otherwise the live control title (tab.Title()),
+        // which follows the shell's real-time title. Never fall back to the
+        // profile name, or the sidebar diverges from the top tab bar.
         auto textBlock = WUX::Controls::TextBlock();
         winrt::hstring displayTitle = tab.Title();
         if (tabImpl)
@@ -6301,18 +6302,6 @@ namespace winrt::TerminalApp::implementation
             if (!customName.empty())
             {
                 displayTitle = customName;
-            }
-            else
-            {
-                auto profile = tabImpl->GetFocusedProfile();
-                if (profile)
-                {
-                    auto profileName = profile.Name();
-                    if (!profileName.empty())
-                    {
-                        displayTitle = profileName;
-                    }
-                }
             }
         }
         textBlock.Text(displayTitle);
@@ -6449,13 +6438,33 @@ namespace winrt::TerminalApp::implementation
             });
         }
 
-        // Entry [1] is "Rename tab". Re-wire it to use the sidebar's own inline
-        // TextBox (the top bar's renamer is on the hidden TabViewItem here).
+        // Entry [1] is "Rename tab". The top bar's renamer lives on _headerControl,
+        // which is invisible in vertical mode (_tabRow Height=0/Opacity=0). We can't
+        // borrow that control, but we reuse its proven state machine:
+        //   show box -> (defer focus one frame so the flyout-closing focus blip is
+        //   gone) -> Enter commits, Escape cancels, LostFocus commits -> on close,
+        //   clear the box text and force the TextBlock back to Visible so no stale
+        //   text remains layered behind. This avoids the earlier "flash and vanish"
+        //   (caused by focus loss on show) and the "garbled text" (caused by the
+        //   box not being cleared/closed on commit).
         if (auto renameItem = contextMenu.Items().GetAt(1).try_as<WUX::Controls::MenuFlyoutItem>())
         {
             auto textBlockWeak = winrt::make_weak(textBlock);
             auto renameBoxWeak = winrt::make_weak(renameBox);
             auto tabProj = tab;
+
+            // Helper to close the box cleanly: hide box, show textblock, clear text.
+            auto closeBox = [textBlockWeak, renameBoxWeak]() {
+                if (auto rb = renameBoxWeak.get())
+                {
+                    rb.Visibility(WUX::Visibility::Collapsed);
+                    rb.Text(L"");
+                }
+                if (auto tb = textBlockWeak.get())
+                {
+                    tb.Visibility(WUX::Visibility::Visible);
+                }
+            };
 
             // Begin editing.
             renameItem.Click([weakThis, textBlockWeak, renameBoxWeak, tabProj](auto&&, auto&&) {
@@ -6471,29 +6480,43 @@ namespace winrt::TerminalApp::implementation
                         const auto currentText = tabImpl ? tabImpl->GetTabText() : winrt::hstring{};
                         rb.Text(currentText.empty() ? tabProj.Title() : currentText);
                         rb.Visibility(WUX::Visibility::Visible);
-                        rb.Focus(WUX::FocusState::Programmatic);
-                        rb.SelectAll();
+                        // Defer focus to the next layout pass. Setting focus
+                        // synchronously here races with the context-flyout
+                        // closing and immediately blurs the box (the old "flash
+                        // and vanish" bug). One frame later the flyout is gone
+                        // and focus sticks.
+                        auto rbWeak = winrt::make_weak(rb);
+                        if (auto dq = winrt::Windows::System::DispatcherQueue::GetForCurrentThread())
+                        {
+                            dq.TryEnqueue([rbWeak]() {
+                                if (auto rb = rbWeak.get())
+                                {
+                                    rb.Focus(WUX::FocusState::Programmatic);
+                                    rb.SelectAll();
+                                }
+                            });
+                        }
                     }
                 }
             });
 
-            // Commit on Enter, cancel on Escape. NOTE: we deliberately do NOT
-            // wire LostFocus. The sidebar ListView/flyout context causes the
-            // TextBox to lose focus the instant it is shown, so a LostFocus
-            // handler would immediately hide the box again — making the renamer
-            // "flash and vanish" before the user could type. Rename closes only
-            // on explicit Enter (commit) or Escape (cancel).
-            renameBox.KeyDown([weakThis, textBlockWeak, renameBoxWeak, tabProj](auto&&, const WUX::Input::KeyRoutedEventArgs& e) {
+            // Enter commits, Escape cancels. Renaming closes ONLY on explicit
+            // Enter/Escape — we do NOT wire LostFocus. The sidebar ListView/flyout
+            // context makes the box lose focus unpredictably, and a LostFocus
+            // handler risked re-introducing the "flash and vanish" bug. The
+            // deferred focus below keeps the box focused for typing; on close,
+            // closeBox clears the text and restores the TextBlock so nothing
+            // stale remains (which was the cause of the earlier garbled text).
+            renameBox.KeyDown([weakThis, renameBoxWeak, tabProj, closeBox](auto&&, const WUX::Input::KeyRoutedEventArgs& e) {
                 const auto key = e.OriginalKey();
                 if (key != Windows::System::VirtualKey::Enter && key != Windows::System::VirtualKey::Escape)
                 {
                     return;
                 }
                 e.Handled(true);
-                const auto commit = (key == Windows::System::VirtualKey::Enter);
-                if (auto page = weakThis.get())
+                if (key == Windows::System::VirtualKey::Enter)
                 {
-                    if (commit)
+                    if (auto page = weakThis.get())
                     {
                         if (auto rb = renameBoxWeak.get())
                         {
@@ -6503,15 +6526,8 @@ namespace winrt::TerminalApp::implementation
                             }
                         }
                     }
-                    if (auto rb = renameBoxWeak.get())
-                    {
-                        rb.Visibility(WUX::Visibility::Collapsed);
-                    }
-                    if (auto tb = textBlockWeak.get())
-                    {
-                        tb.Visibility(WUX::Visibility::Visible);
-                    }
                 }
+                closeBox();
             });
         }
 
@@ -6724,8 +6740,12 @@ namespace winrt::TerminalApp::implementation
 
         _verticalTabListView.Items().InsertAt(index, grid);
 
-        // Listen for title and status changes on the tab
-        tab.PropertyChanged([weakThis](auto&&, const WUX::Data::PropertyChangedEventArgs& args) {
+        // Listen for title and status changes on the tab. Refresh ONLY this tab's
+        // own sidebar item (looked up by current position) — the previous version
+        // re-walked every tab on every Title change, which mixed up controls and
+        // produced garbled text during/after a rename.
+        auto tabProjForTitle = tab;
+        tab.PropertyChanged([weakThis, tabProjForTitle](auto&&, const WUX::Data::PropertyChangedEventArgs& args) {
             auto page = weakThis.get();
             if (!page)
                 return;
@@ -6734,39 +6754,35 @@ namespace winrt::TerminalApp::implementation
 
             if (propName == L"Title")
             {
-                // Update all titles to match current tab titles
-                for (uint32_t i = 0; i < page->_tabs.Size() && i < page->_verticalTabListView.Items().Size(); i++)
+                // Find this tab's CURRENT sidebar position (it may have moved).
+                uint32_t i = 0;
+                if (!page->_tabs.IndexOf(tabProjForTitle, i))
                 {
-                    auto t = page->_tabs.GetAt(i);
-                    if (auto itemGrid = page->_verticalTabListView.Items().GetAt(i).try_as<WUX::Controls::Grid>())
+                    return;
+                }
+                if (i >= page->_verticalTabListView.Items().Size())
+                {
+                    return;
+                }
+                if (auto itemGrid = page->_verticalTabListView.Items().GetAt(i).try_as<WUX::Controls::Grid>())
+                {
+                    for (auto&& child : itemGrid.Children())
                     {
-                        for (auto&& child : itemGrid.Children())
+                        if (auto tb = child.try_as<WUX::Controls::TextBlock>())
                         {
-                            if (auto tb = child.try_as<WUX::Controls::TextBlock>())
+                            // Mirror the top tab bar: custom name wins, else the
+                            // live control title. No profile-name fallback.
+                            winrt::hstring title = tabProjForTitle.Title();
+                            if (auto tImpl = _GetTabImpl(tabProjForTitle))
                             {
-                                // Prefer a user-set custom name, then profile
-                                // name, then the live tab title. This matches the
-                                // initial display logic so a rename sticks.
-                                winrt::hstring title = t.Title();
-                                if (auto tImpl = _GetTabImpl(t))
+                                const auto customName = tImpl->GetTabText();
+                                if (!customName.empty())
                                 {
-                                    const auto customName = tImpl->GetTabText();
-                                    if (!customName.empty())
-                                    {
-                                        title = customName;
-                                    }
-                                    else
-                                    {
-                                        auto prof = tImpl->GetFocusedProfile();
-                                        if (prof && !prof.Name().empty())
-                                        {
-                                            title = prof.Name();
-                                        }
-                                    }
+                                    title = customName;
                                 }
-                                tb.Text(title);
-                                break;
                             }
+                            tb.Text(title);
+                            break;
                         }
                     }
                 }
