@@ -1149,6 +1149,8 @@ namespace winrt::TerminalApp::implementation
                 tab.Focus(FocusState::Programmatic);
                 _UpdateMRUTab(tab);
                 _updateAllTabCloseButtons();
+                // 侧边栏标签颜色状态机:活动切换后刷新所有标签(活动实色/非活动半透明)
+                _UpdateAllSidebarTabColors();
             }
 
             tab.TabViewItem().StartBringIntoView();

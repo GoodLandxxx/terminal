@@ -549,6 +549,11 @@ namespace winrt::TerminalApp::implementation
         void _AddVerticalTabEntry(const winrt::TerminalApp::Tab& tab, uint32_t index);
         void _RemoveVerticalTabEntry(uint32_t index);
         void _UpdateVerticalTabTitle(uint32_t index, const winrt::hstring& title);
+        // 按活动态(实色)/非活动(半透明)/hover 给侧边栏 idx 标签刷新 bgBorder 染色
+        // + TabHeaderControl 标题前景色(亮度反转)。hover 为 true 时非活动 tab 用 hover 透明度。
+        void _ApplySidebarTabColor(const winrt::TerminalApp::Tab& tab, uint32_t index, bool hover);
+        // 遍历所有侧边栏标签,按各自活动态刷新颜色(活动 tab 切换时调用)
+        void _UpdateAllSidebarTabColors();
         void _OnSidebarResizePointerPressed(const IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& args);
         void _OnSidebarResizePointerMoved(const IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& args);
         void _OnSidebarResizePointerReleased(const IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& args);

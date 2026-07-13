@@ -6239,7 +6239,10 @@ namespace winrt::TerminalApp::implementation
         // 必须作为 grid 的第一个 child(画在最底层),横跨所有 3 列。
         auto bgBorder = WUX::Controls::Border();
         bgBorder.Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
-        // 整行铺满染色(横跨 3 列,无圆角无边距),让设了颜色的标签整行着色。
+        // 药丸形(照搬顶部 TabView 选中标签):圆角 + 四边留白,让标签像浮起的卡片,
+        // 标签之间有间距。横跨 3 列(覆盖 colorBar/headerControl/closeBtn)。
+        bgBorder.CornerRadius(WUX::CornerRadiusHelper::FromUniformRadius(8));
+        bgBorder.Margin(WUX::ThicknessHelper::FromUniformLength(3));
         WUX::Controls::Grid::SetColumn(bgBorder, 0);
         WUX::Controls::Grid::SetColumnSpan(bgBorder, 3);
         grid.Children().Append(bgBorder);
@@ -6262,15 +6265,12 @@ namespace winrt::TerminalApp::implementation
             auto tabColor = tabImpl->GetTabColor();
             if (tabColor.has_value())
             {
+                // 4px 色条用纯色(不随活动态变)
                 colorBar.Background(WUX::Media::SolidColorBrush{ tabColor.value() });
-                // Apply a semi-transparent version to the whole tab background.
-                // 新 WinUI 下 grid.Background 不被 ListViewItem 渲染,改用底层 bgBorder 承载。
-                // alpha=80:40 太淡肉眼几乎不可见,提到 80 让 tabColor 染色清晰可辨。
-                auto bgColor = tabColor.value();
-                bgColor.A = 80;
-                bgBorder.Background(WUX::Media::SolidColorBrush{ bgColor });
             }
         }
+        // bgBorder 整行染色 + 字体反转按活动态算,统一走 helper(hover=false,初始无 hover)
+        _ApplySidebarTabColor(tab, index, false);
 
         // Title — mirror the top tab bar exactly: a user-set custom name
         // (GetTabText) wins, otherwise the live control title (tab.Title()),
@@ -6735,6 +6735,25 @@ namespace winrt::TerminalApp::implementation
         grid.ContextFlyout(contextMenu);
         } // end if (tabImpl)
 
+        // hover 态:鼠标进入非活动标签时切到 hover 透明度(0.6),离开恢复非活动(0.3)。
+        // 活动 tab 不响应 hover(保持实色)。helper 内部按 _GetFocusedTabIndex 判活动。
+        {
+            auto hoverTabProj = tab;
+            auto hoverIdx = index;
+            grid.PointerEntered([weakThis, hoverTabProj, hoverIdx](auto&&, auto&&) {
+                if (auto page = weakThis.get())
+                {
+                    page->_ApplySidebarTabColor(hoverTabProj, hoverIdx, true);
+                }
+            });
+            grid.PointerExited([weakThis, hoverTabProj, hoverIdx](auto&&, auto&&) {
+                if (auto page = weakThis.get())
+                {
+                    page->_ApplySidebarTabColor(hoverTabProj, hoverIdx, false);
+                }
+            });
+        }
+
         _verticalTabListView.Items().InsertAt(index, grid);
 
         // Listen for title and status changes on the tab. Refresh ONLY this tab's
@@ -6809,57 +6828,36 @@ namespace winrt::TerminalApp::implementation
 
                 if (propName == L"TabColorIndicator")
                 {
-                    // 用 tab 反查 _tabs 索引,再从当前真实的 Items[idx] Grid 现找控件
+                    // 用 tab 反查 _tabs 索引,bgBorder 染色 + 字体反转统一走 helper。
+                    // colorBar(4px 色条)单独刷:helper 不管它,这里保持纯色。
                     uint32_t idx = 0;
                     if (!page->_tabs.IndexOf(tabForColor, idx))
                         return;
                     if (idx >= page->_verticalTabListView.Items().Size())
                         return;
-                    auto itemGrid = page->_verticalTabListView.Items().GetAt(idx).try_as<WUX::Controls::Grid>();
-                    if (!itemGrid)
-                        return;
 
-                    // 从当前真实的 children 里找 colorBar(ColumnSpan=1,Width=4)和
-                    // bgBorder(ColumnSpan=3,整行底层染色)。两者都是 Border,靠
-                    // Grid.GetColumnSpan 区分。
-                    WUX::Controls::Border cb{ nullptr };
-                    WUX::Controls::Border bgBd{ nullptr };
-                    for (auto&& child : itemGrid.Children())
+                    // 刷 colorBar 纯色(若有)
+                    if (auto itemGrid = page->_verticalTabListView.Items().GetAt(idx).try_as<WUX::Controls::Grid>())
                     {
-                        if (auto b = child.try_as<WUX::Controls::Border>())
+                        auto tImpl = _GetTabImpl(tabForColor);
+                        auto tabColor = tImpl ? tImpl->GetTabColor() : std::optional<winrt::Windows::UI::Color>{ std::nullopt };
+                        for (auto&& child : itemGrid.Children())
                         {
-                            if (WUX::Controls::Grid::GetColumnSpan(b) > 1)
-                            {
-                                bgBd = b;
-                            }
-                            else if (b.Width() < 8) // colorBar Width=4
-                            {
-                                cb = b;
+                            if (auto b = child.try_as<WUX::Controls::Border>())
+            {
+                                if (WUX::Controls::Grid::GetColumnSpan(b) <= 1 && b.Width() < 8) // colorBar
+                                {
+                                    b.Background(tabColor.has_value() ?
+                                        WUX::Media::SolidColorBrush{ tabColor.value() } :
+                                        WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
+                                    break;
+                                }
                             }
                         }
                     }
 
-                    auto tImpl = _GetTabImpl(tabForColor);
-                    if (tImpl)
-                    {
-                        auto tabColor = tImpl->GetTabColor();
-                        if (tabColor.has_value())
-                        {
-                            if (cb)
-                                cb.Background(WUX::Media::SolidColorBrush{ tabColor.value() });
-                            auto bgColor = tabColor.value();
-                            bgColor.A = 80; // 与 _AddVerticalTabEntry 初始染色保持一致
-                            if (bgBd)
-                                bgBd.Background(WUX::Media::SolidColorBrush{ bgColor });
-                        }
-                        else
-                        {
-                            if (cb)
-                                cb.Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
-                            if (bgBd)
-                                bgBd.Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
-                        }
-                    }
+                    // bgBorder + 字体走 helper
+                    page->_ApplySidebarTabColor(tabForColor, idx, false);
                 }
             });
         }
@@ -6890,6 +6888,106 @@ namespace winrt::TerminalApp::implementation
                     }
                 }
             }
+        }
+    }
+
+    // Vertical tab sidebar: 按活动态/hover 给 idx 标签刷新 bgBorder 染色 +
+    // TabHeaderControl 标题前景色(亮度反转)。照搬顶部 TabView _ApplyTabColorOnUIThread:
+    //   活动 tab → 实色(alpha 255);非活动 → alpha 77(0.3);hover(仅非活动) → alpha 153(0.6)。
+    //   字体:ColorFix::GetLightness(tabColor) >= 0.6 黑字,否则白字。
+    void TerminalPage::_ApplySidebarTabColor(const winrt::TerminalApp::Tab& tab, uint32_t index, bool hover)
+    {
+        if (!_verticalTabListView || index >= _verticalTabListView.Items().Size())
+        {
+            return;
+        }
+        auto itemGrid = _verticalTabListView.Items().GetAt(index).try_as<WUX::Controls::Grid>();
+        if (!itemGrid)
+        {
+            return;
+        }
+        // 找 bgBorder(ColumnSpan=3 的底层 Border)和 TabHeaderControl
+        WUX::Controls::Border bgBd{ nullptr };
+        winrt::TerminalApp::TabHeaderControl hc{ nullptr };
+        for (auto&& child : itemGrid.Children())
+        {
+            if (auto b = child.try_as<WUX::Controls::Border>())
+            {
+                if (WUX::Controls::Grid::GetColumnSpan(b) > 1)
+                {
+                    bgBd = b;
+                }
+            }
+            else if (auto h = child.try_as<winrt::TerminalApp::TabHeaderControl>())
+            {
+                hc = h;
+            }
+        }
+
+        auto tabImpl = _GetTabImpl(tab);
+        if (!tabImpl)
+        {
+            return;
+        }
+        auto tabColorOpt = tabImpl->GetTabColor();
+        if (!bgBd)
+        {
+            return;
+        }
+        if (!tabColorOpt.has_value())
+        {
+            // 没设色:透明背景。前景色还原为系统默认主题资源(不能用 nullptr,
+            // nullptr 会清空 brush,浅色主题下文字看不见)。用 ApplicationForegroundThemeBrush
+            // 对应亮/暗主题的默认文字色。
+            bgBd.Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
+            if (hc)
+            {
+                hc.Foreground(winrt::Windows::UI::Xaml::Application::Current().Resources().TryLookup(winrt::box_value(L"ApplicationForegroundThemeBrush")).try_as<WUX::Media::Brush>());
+            }
+            return;
+        }
+
+        // 判断活动态
+        const auto focusedIdx = _GetFocusedTabIndex();
+        const bool isActive = focusedIdx.has_value() && *focusedIdx == index;
+
+        auto bgColor = tabColorOpt.value();
+        if (isActive)
+        {
+            bgColor.A = 255; // 实色
+        }
+        else if (hover)
+        {
+            bgColor.A = 153; // 0.6
+        }
+        else
+        {
+            bgColor.A = 77; // 0.3
+        }
+        bgBd.Background(WUX::Media::SolidColorBrush{ bgColor });
+
+        // 字体亮度反转(照搬顶部 lightnessThreshold=0.6)。用 Control 基类 Foreground,
+        // HeaderTextBlock 在 xaml 里不设 Foreground 会继承,无需给 TabHeaderControl 加 idl 属性。
+        if (hc)
+        {
+            const til::color color{ tabColorOpt.value() };
+            WUX::Media::SolidColorBrush fontBrush;
+            fontBrush.Color(ColorFix::GetLightness(color) >= 0.6f ? Windows::UI::Colors::Black() : Windows::UI::Colors::White());
+            hc.Foreground(fontBrush);
+        }
+    }
+
+    // 遍历所有侧边栏标签,按各自活动态刷新颜色(活动 tab 切换时调用)。hover=false。
+    void TerminalPage::_UpdateAllSidebarTabColors()
+    {
+        if (!_verticalTabListView)
+        {
+            return;
+        }
+        const auto count = std::min(_tabs.Size(), _verticalTabListView.Items().Size());
+        for (uint32_t i = 0; i < count; i++)
+        {
+            _ApplySidebarTabColor(_tabs.GetAt(i), i, false);
         }
     }
 
