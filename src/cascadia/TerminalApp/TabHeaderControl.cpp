@@ -41,14 +41,21 @@ namespace winrt::TerminalApp::implementation
             {
                 if (e.OriginalKey() == Windows::System::VirtualKey::Enter)
                 {
-                    // User is done making changes, close the rename box
+                    // User is done making changes — 直接提交并关闭。原来只调 _CloseRenameBox
+                    // 再靠随后的 LostFocus 来 raise TitleChangeRequested,但侧边栏走右键菜单
+                    // 触发,失焦路径不可靠。这里主动 raise 提交,_renameCommitted 标记阻止
+                    // 随后关闭触发的失焦重复 raise。
+                    const auto newText = HeaderRenamerTextBox().Text();
+                    _renameCommitted = true;
                     _CloseRenameBox();
+                    TitleChangeRequested.raise(newText);
                 }
                 else if (e.OriginalKey() == Windows::System::VirtualKey::Escape)
                 {
                     // User wants to discard the changes they made,
                     // set _renameCancelled to true and close the rename box
                     _renameCancelled = true;
+                    _renameCommitted = true;
                     _CloseRenameBox();
                 }
             }
@@ -74,6 +81,8 @@ namespace winrt::TerminalApp::implementation
     {
         _receivedKeyDown = false;
         _renameCancelled = false;
+        _renameCommitted = false;
+        _renameStartedTick = GetTickCount64();
 
         HeaderTextBlock().Visibility(Windows::UI::Xaml::Visibility::Collapsed);
         HeaderRenamerTextBox().Visibility(Windows::UI::Xaml::Visibility::Visible);
@@ -97,10 +106,24 @@ namespace winrt::TerminalApp::implementation
     void TabHeaderControl::RenameBoxLostFocusHandler(const Windows::Foundation::IInspectable& /*sender*/,
                                                      const Windows::UI::Xaml::RoutedEventArgs& /*e*/)
     {
+        // 已主动结束(回车提交/Esc 取消)后的关闭失焦 —— 不重复处理。
+        if (_renameCommitted)
+        {
+            return;
+        }
+
         // If the context menu associated with the renamer text box is open we know it gained the focus.
         // In this case we ignore this event (we will regain the focus once the menu will be closed).
         const auto flyout = HeaderRenamerTextBox().ContextFlyout();
         if (flyout && flyout.IsOpen())
+        {
+            return;
+        }
+
+        // BeginRename 后短时间(<=300ms)内的失焦,判定为调用方 context flyout(右键菜单)
+        // 关闭的焦点抖动 —— 静默忽略(不关闭、不重新 Focus),避免"一闪而过"且不触发
+        // focus/blur 闪烁循环。超过此时间的失焦视为用户真实操作(点别处),走正常提交。
+        if (GetTickCount64() - _renameStartedTick <= 300)
         {
             return;
         }

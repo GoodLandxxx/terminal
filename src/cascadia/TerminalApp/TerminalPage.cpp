@@ -6239,6 +6239,7 @@ namespace winrt::TerminalApp::implementation
         // 必须作为 grid 的第一个 child(画在最底层),横跨所有 3 列。
         auto bgBorder = WUX::Controls::Border();
         bgBorder.Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
+        // 整行铺满染色(横跨 3 列,无圆角无边距),让设了颜色的标签整行着色。
         WUX::Controls::Grid::SetColumn(bgBorder, 0);
         WUX::Controls::Grid::SetColumnSpan(bgBorder, 3);
         grid.Children().Append(bgBorder);
@@ -6264,8 +6265,9 @@ namespace winrt::TerminalApp::implementation
                 colorBar.Background(WUX::Media::SolidColorBrush{ tabColor.value() });
                 // Apply a semi-transparent version to the whole tab background.
                 // 新 WinUI 下 grid.Background 不被 ListViewItem 渲染,改用底层 bgBorder 承载。
+                // alpha=80:40 太淡肉眼几乎不可见,提到 80 让 tabColor 染色清晰可辨。
                 auto bgColor = tabColor.value();
-                bgColor.A = 40; // subtle tint
+                bgColor.A = 80;
                 bgBorder.Background(WUX::Media::SolidColorBrush{ bgColor });
             }
         }
@@ -6295,8 +6297,36 @@ namespace winrt::TerminalApp::implementation
             headerControl.TabStatus(tabImpl->TabStatus());
         }
         headerControl.VerticalAlignment(WUX::VerticalAlignment::Center);
+        headerControl.HorizontalAlignment(WUX::HorizontalAlignment::Stretch);
         WUX::Controls::Grid::SetColumn(headerControl, 1);
         grid.Children().Append(headerControl);
+
+        // 重命名输入框宽度跟随侧边栏宽度(而非按文字多少):订阅 headerControl 的
+        // SizeChanged,把 RenamerMaxWidth 设为当前 ActualWidth(减去前面图标的估算
+        // 占位),侧边栏拖宽/拖窄时输入框 MaxWidth 自动跟着变。
+        {
+            auto hcWeak = winrt::make_weak(headerControl);
+            headerControl.SizeChanged([hcWeak](auto&& sender, auto&&) {
+                auto hc = hcWeak.get();
+                if (!hc)
+                {
+                    return;
+                }
+                auto actual = sender.try_as<WUX::Controls::UserControl>();
+                if (!actual)
+                {
+                    return;
+                }
+                // ActualWidth 是 headerCol 列宽。留 32px 给前面的状态图标 +
+                // ProgressRing 占位,剩余给输入框。下限 60 保证最小可用。
+                double w = actual.ActualWidth() - 32.0;
+                if (w < 60.0)
+                {
+                    w = 60.0;
+                }
+                hc.RenamerMaxWidth(w);
+            });
+        }
 
         // Close button
         auto closeBtn = WUX::Controls::Button();
@@ -6361,11 +6391,26 @@ namespace winrt::TerminalApp::implementation
         // fresh per-click picker: wire ColorSelected/ColorCleared straight to the
         // right-clicked tab, then ShowAt on this grid (no Hide first). A brand-new
         // flyout each click also avoids accumulating handlers on a shared instance.
-        if (auto colorItem = contextMenu.Items().GetAt(0).try_as<WUX::Controls::MenuFlyoutItem>())
+        if (auto origColorItem = contextMenu.Items().GetAt(0).try_as<WUX::Controls::MenuFlyoutItem>())
         {
+            // BuildContextMenu 已给 [0] 绑了 Tab::_chooseColorClicked,它走
+            // AttachColorPicker 对隐藏的顶部 TabViewItem 做 ShowAt,与侧边栏自己的
+            // ShowAt 竞争同一个 _tabColorPicker,导致 Closed handler 提前撤销
+            // ColorSelected,选色不生效。MenuFlyoutItem.Click 是多播事件、无法精确
+            // 撤销旧 handler,所以这里用一个全新 MenuFlyoutItem 替换 [0](完整复制
+            // 文本/图标/tooltip/无障碍属性),只绑侧边栏自己的逻辑,彻底切断
+            // _chooseColorClicked → AttachColorPicker 路径。
+            auto sidebarColorItem = WUX::Controls::MenuFlyoutItem();
+            sidebarColorItem.Text(origColorItem.Text());
+            if (auto origIcon = origColorItem.Icon())
+            {
+                sidebarColorItem.Icon(origIcon);
+            }
+            sidebarColorItem.IsEnabled(origColorItem.IsEnabled());
+
             auto gridWeak = winrt::make_weak(grid);
             auto tabProj = tab;
-            colorItem.Click([weakThis, gridWeak, tabProj](auto&&, auto&&) {
+            sidebarColorItem.Click([weakThis, gridWeak, tabProj](auto&&, auto&&) {
                 auto page = weakThis.get();
                 if (!page)
                 {
@@ -6409,6 +6454,10 @@ namespace winrt::TerminalApp::implementation
                     page->_tabColorPicker.ShowAt(g);
                 }
             });
+
+            // 用干净的新项替换原 [0]
+            contextMenu.Items().RemoveAt(0);
+            contextMenu.Items().InsertAt(0, sidebarColorItem);
         }
 
         // Entry [1] is "Rename tab". The top bar's renamer lives on _headerControl,
@@ -6432,13 +6481,18 @@ namespace winrt::TerminalApp::implementation
                     {
                         tabImpl->SetTabText(title);
                     }
+                    // 提交后把焦点移到 ListView,避免输入框关闭后焦点自动落到旁边的
+                    // 关闭按钮(易误触关掉标签)。
+                    if (page->_verticalTabListView)
+                    {
+                        page->_verticalTabListView.Focus(WUX::FocusState::Programmatic);
+                    }
                 }
             });
 
-            // Begin editing. Defer one frame: the context flyout is still closing
-            // when this click fires, and calling BeginRename synchronously loses
-            // focus back to the closing flyout (the old "flash and vanish"). One
-            // frame later the flyout is gone and the renamer keeps focus.
+            // Begin editing. 延一帧让 context flyout 先开始关闭。焦点抖动由
+            // TabHeaderControl 的 _renameStartedTick 时间窗兜底(BeginRename 后
+            // 300ms 内的失焦判为菜单关闭抖动,静默忽略)。
             renameItem.Click([headerControlWeak](auto&&, auto&&) {
                 if (auto dq = winrt::Windows::System::DispatcherQueue::GetForCurrentThread())
                 {
@@ -6453,14 +6507,24 @@ namespace winrt::TerminalApp::implementation
             });
         }
 
-        // Entry [2] is "Duplicate tab". The top-bar handler (_HandleDuplicateTab)
-        // ignores the sender and duplicates the FOCUSED tab, which in the sidebar
-        // is the wrong tab (and races with the async focus switch, causing a
-        // hresult_error). Bind directly to the right-clicked tab instead.
-        if (auto dupItem = contextMenu.Items().GetAt(2).try_as<WUX::Controls::MenuFlyoutItem>())
+        // Entry [2] is "Duplicate tab". BuildContextMenu 已给 [2] 绑了
+        // Tab::_duplicateTabClicked(走 action,_HandleDuplicateTab 会复制 focused tab,
+        // 在侧边栏是错目标且会 race 报错)。直接在 dupItem 上追加 Click 会和原始
+        // handler 双触发 → 复制出两个标签。MenuFlyoutItem.Click 是多播、无法精确撤销
+        // 旧 handler,所以新建一个干净项替换 [2](复制文本/图标),只绑侧边栏逻辑(直接
+        // _DuplicateTab 右键的 tab),彻底切断原始 action 路径。
+        if (auto origDup = contextMenu.Items().GetAt(2).try_as<WUX::Controls::MenuFlyoutItem>())
         {
+            auto sidebarDup = WUX::Controls::MenuFlyoutItem();
+            sidebarDup.Text(origDup.Text());
+            if (auto origIcon = origDup.Icon())
+            {
+                sidebarDup.Icon(origIcon);
+            }
+            sidebarDup.IsEnabled(origDup.IsEnabled());
+
             auto tabProj = tab;
-            dupItem.Click([weakThis, tabProj](auto&&, auto&&) {
+            sidebarDup.Click([weakThis, tabProj](auto&&, auto&&) {
                 if (auto page = weakThis.get())
                 {
                     if (auto tabImpl = _GetTabImpl(tabProj))
@@ -6469,16 +6533,25 @@ namespace winrt::TerminalApp::implementation
                     }
                 }
             });
+            contextMenu.Items().RemoveAt(2);
+            contextMenu.Items().InsertAt(2, sidebarDup);
         }
 
-        // Entry [3] is "Split tab". _HandleSplitPane derives duplicateFromTab from
-        // _GetFocusedTab() (not the sender), so on a non-focused sidebar tab it
-        // splits the right-clicked tab but duplicates the focused one, throwing.
-        // Bind both the split target and the duplicate source to the right-clicked tab.
-        if (auto splitItem = contextMenu.Items().GetAt(3).try_as<WUX::Controls::MenuFlyoutItem>())
+        // Entry [3] is "Split tab". 同 [2] 的原因:BuildContextMenu 绑的
+        // _splitTabClicked 走 action,侧边栏追加 handler 会双触发 → 多重拆分。
+        // 新建项替换,只绑侧边栏逻辑(拆右键的 tab)。
+        if (auto origSplit = contextMenu.Items().GetAt(3).try_as<WUX::Controls::MenuFlyoutItem>())
         {
+            auto sidebarSplit = WUX::Controls::MenuFlyoutItem();
+            sidebarSplit.Text(origSplit.Text());
+            if (auto origIcon = origSplit.Icon())
+            {
+                sidebarSplit.Icon(origIcon);
+            }
+            sidebarSplit.IsEnabled(origSplit.IsEnabled());
+
             auto tabProj = tab;
-            splitItem.Click([weakThis, tabProj](auto&&, auto&&) {
+            sidebarSplit.Click([weakThis, tabProj](auto&&, auto&&) {
                 auto page = weakThis.get();
                 if (!page)
                 {
@@ -6492,6 +6565,8 @@ namespace winrt::TerminalApp::implementation
                 auto newPane = page->_MakePane(nullptr, tabProj, nullptr);
                 page->_SplitPane(tabImpl, Microsoft::Terminal::Settings::Model::SplitDirection::Automatic, 0.5f, newPane);
             });
+            contextMenu.Items().RemoveAt(3);
+            contextMenu.Items().InsertAt(3, sidebarSplit);
         }
 
         auto tabProj = tab;
@@ -6719,9 +6794,13 @@ namespace winrt::TerminalApp::implementation
         if (tabImpl)
         {
             auto status = tabImpl->TabStatus();
-            auto colorBarWeak = winrt::make_weak(colorBar);
+            // 用 tab 的弱引用,而不是 colorBar/bgBorder 的弱引用:ListView 容器虚拟化会
+            // 回收并重建 item 的子控件,缓存的 colorBar 弱引用会失效(实测 colorBarWeak
+            // DEAD,颜色刷不上)。回调里用 tab 反查 _tabs 索引,从当前真实的 Items[idx]
+            // Grid 现找 colorBar/bgBorder,免疫控件对象回收。
+            auto tabForColor = tab;
 
-            status.PropertyChanged([weakThis, colorBarWeak, bgBorderWeak](auto&&, const WUX::Data::PropertyChangedEventArgs& args) {
+            status.PropertyChanged([weakThis, tabForColor](auto&&, const WUX::Data::PropertyChangedEventArgs& args) {
                 auto page = weakThis.get();
                 if (!page)
                     return;
@@ -6730,45 +6809,55 @@ namespace winrt::TerminalApp::implementation
 
                 if (propName == L"TabColorIndicator")
                 {
-                    if (auto cb = colorBarWeak.get())
+                    // 用 tab 反查 _tabs 索引,再从当前真实的 Items[idx] Grid 现找控件
+                    uint32_t idx = 0;
+                    if (!page->_tabs.IndexOf(tabForColor, idx))
+                        return;
+                    if (idx >= page->_verticalTabListView.Items().Size())
+                        return;
+                    auto itemGrid = page->_verticalTabListView.Items().GetAt(idx).try_as<WUX::Controls::Grid>();
+                    if (!itemGrid)
+                        return;
+
+                    // 从当前真实的 children 里找 colorBar(ColumnSpan=1,Width=4)和
+                    // bgBorder(ColumnSpan=3,整行底层染色)。两者都是 Border,靠
+                    // Grid.GetColumnSpan 区分。
+                    WUX::Controls::Border cb{ nullptr };
+                    WUX::Controls::Border bgBd{ nullptr };
+                    for (auto&& child : itemGrid.Children())
                     {
-                        auto items = page->_verticalTabListView.Items();
-                        for (uint32_t i = 0; i < page->_tabs.Size() && i < items.Size(); i++)
+                        if (auto b = child.try_as<WUX::Controls::Border>())
                         {
-                            if (auto itemGrid = items.GetAt(i).try_as<WUX::Controls::Grid>())
+                            if (WUX::Controls::Grid::GetColumnSpan(b) > 1)
                             {
-                                for (auto&& child : itemGrid.Children())
-                                {
-                                    if (child.try_as<WUX::Controls::Border>() == cb)
-                                    {
-                                        auto t = page->_tabs.GetAt(i);
-                                        if (auto tImpl = _GetTabImpl(t))
-                                        {
-                                            auto tabColor = tImpl->GetTabColor();
-                                            if (tabColor.has_value())
-                                            {
-                                                cb.Background(WUX::Media::SolidColorBrush{ tabColor.value() });
-                                                auto bgColor = tabColor.value();
-                                                bgColor.A = 40;
-                                                // 同样改用 bgBorder 而不是 itemGrid.Background
-                                                if (auto bb = bgBorderWeak.get())
-                                                {
-                                                    bb.Background(WUX::Media::SolidColorBrush{ bgColor });
-                                                }
-                                            }
-                                            else
-                                            {
-                                                cb.Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
-                                                if (auto bb = bgBorderWeak.get())
-                                                {
-                                                    bb.Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
-                                                }
-                                            }
-                                        }
-                                        return;
-                                    }
-                                }
+                                bgBd = b;
                             }
+                            else if (b.Width() < 8) // colorBar Width=4
+                            {
+                                cb = b;
+                            }
+                        }
+                    }
+
+                    auto tImpl = _GetTabImpl(tabForColor);
+                    if (tImpl)
+                    {
+                        auto tabColor = tImpl->GetTabColor();
+                        if (tabColor.has_value())
+                        {
+                            if (cb)
+                                cb.Background(WUX::Media::SolidColorBrush{ tabColor.value() });
+                            auto bgColor = tabColor.value();
+                            bgColor.A = 80; // 与 _AddVerticalTabEntry 初始染色保持一致
+                            if (bgBd)
+                                bgBd.Background(WUX::Media::SolidColorBrush{ bgColor });
+                        }
+                        else
+                        {
+                            if (cb)
+                                cb.Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
+                            if (bgBd)
+                                bgBd.Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
                         }
                     }
                 }
