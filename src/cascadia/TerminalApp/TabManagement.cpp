@@ -1313,6 +1313,21 @@ namespace winrt::TerminalApp::implementation
                 tabs.RemoveAt(from.value());
                 tabs.InsertAt(to.value(), tab);
                 _UpdateTabIndices();
+
+                // Sidebar: sync vertical tab list to match the drag reorder.
+                // _TryMoveTab (Move Up/Down) already syncs all three collections; this
+                // drag-reorder path must keep the sidebar ListView in the same order too,
+                // otherwise the sidebar's item order silently diverges from _tabs after a drag.
+                // Note: unlike _TryMoveTab, we do NOT set _verticalTabListView.SelectedIndex
+                // here -- the TabRow().TabView().SelectedIndex(to) call at the end of this
+                // function triggers the reverse-selection-sync that updates the sidebar.
+                if (_verticalTabListView)
+                {
+                    auto vertItems = _verticalTabListView.Items();
+                    auto vertItem = vertItems.GetAt(from.value());
+                    vertItems.RemoveAt(from.value());
+                    vertItems.InsertAt(to.value(), vertItem);
+                }
             }
             CATCH_LOG();
         }

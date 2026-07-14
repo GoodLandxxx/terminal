@@ -40,19 +40,56 @@
                       Padding="4"
                       SelectionMode="Single"
                       SelectionChanged="_OnVerticalTabSelectionChanged">
+                <!-- 关掉 ListViewItemPresenter 内置的选中/悬停/按下高亮。
+                     Presenter 选中矩形的 Margin/CornerRadius 是硬编码的,无法靠
+                     ListViewItem 的 Padding/CornerRadius 消除留白;而 SelectionBackground
+                     等是 Presenter 的属性(不是 ListViewItem 的,不能在 Style 里 Setter)。
+                     这里在 ListView 局部 Resources 里把驱动这些高亮的 ThemeResource 覆盖成
+                     透明(就近原则,只影响本 ListView,不污染 CommandPalette/Settings 等其他
+                     ListView)。选中态视觉改由 bgBorder(整行铺满、Margin=0)承担。 -->
+                <ListView.Resources>
+                    <ResourceDictionary>
+                        <SolidColorBrush x:Key="ListViewItemBackgroundSelected" Color="Transparent" />
+                        <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPointerOver" Color="Transparent" />
+                        <SolidColorBrush x:Key="ListViewItemBackgroundSelectedPressed" Color="Transparent" />
+                        <SolidColorBrush x:Key="ListViewItemBackgroundPointerOver" Color="Transparent" />
+                        <SolidColorBrush x:Key="ListViewItemBackgroundPressed" Color="Transparent" />
+                    </ResourceDictionary>
+                </ListView.Resources>
                 <ListView.ItemContainerStyle>
                     <Style TargetType="ListViewItem">
                         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                        <Setter Property="Padding" Value="4,2" />
+                        <!-- VerticalContentAlignment=Stretch 让内容(grid)撑满
+                             ListViewItem 的整行高度;否则 grid 垂直居中只占内容高度,
+                             内部 bgBorder 即使 Stretch 也只撑满矮矮的内容区,
+                             上下露出留白。 -->
+                        <Setter Property="VerticalContentAlignment" Value="Stretch" />
+                        <!-- Padding=0 让相邻标签上下紧挨、彻底无缝(配合 bgBorder 的
+                             Margin=0,标签色平铺到容器四边,无外露背景边)。 -->
+                        <Setter Property="Padding" Value="0" />
                         <Setter Property="MinHeight" Value="32" />
-                        <!-- Make the ListViewItem background transparent so the
-                             inner Grid.Background (semi-transparent tab color
-                             tint set in _AddVerticalTabEntry) shows through.
-                             Selected/SelectedUnfocused visual states use
-                             independent animation brushes in the default
-                             ListViewItem template, so selection highlight is
-                             preserved. -->
+                        <!-- 自定义 ControlTemplate:只用一个撑满的 Border + ContentPresenter,
+                             不用 ListViewItemPresenter。默认模板的 Presenter 在选中/悬停时会
+                             画自带 Margin+圆角的高亮矩形(蓝色选中框),无法靠 ThemeResource
+                             覆盖或 Padding 消除(实测局部 Resources 覆盖不生效,蓝色仍在)。
+                             去掉 Presenter 后,选中态无任何默认背景,橙色 bgBorder(整行铺满)
+                             成为唯一可见的选中/颜色背景。模板内不声明 Selected 视觉状态画背景。 -->
                         <Setter Property="Background" Value="Transparent" />
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="ListViewItem">
+                                    <Border Background="{TemplateBinding Background}"
+                                            BorderBrush="{TemplateBinding BorderBrush}"
+                                            BorderThickness="{TemplateBinding BorderThickness}"
+                                            Padding="{TemplateBinding Padding}">
+                                        <ContentPresenter Content="{TemplateBinding Content}"
+                                                          ContentTemplate="{TemplateBinding ContentTemplate}"
+                                                          HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                                    </Border>
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
                     </Style>
                 </ListView.ItemContainerStyle>
             </ListView>

@@ -6239,10 +6239,14 @@ namespace winrt::TerminalApp::implementation
         // 必须作为 grid 的第一个 child(画在最底层),横跨所有 3 列。
         auto bgBorder = WUX::Controls::Border();
         bgBorder.Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
-        // 药丸形(照搬顶部 TabView 选中标签):圆角 + 四边留白,让标签像浮起的卡片,
-        // 标签之间有间距。横跨 3 列(覆盖 colorBar/headerControl/closeBtn)。
-        bgBorder.CornerRadius(WUX::CornerRadiusHelper::FromUniformRadius(8));
-        bgBorder.Margin(WUX::ThicknessHelper::FromUniformLength(3));
+        // 平铺贴边:无 Margin + 小圆角(3)。橙色(标签色)贴到标签容器四边、
+        // 相邻标签之间紧挨无缝;圆角收得很小,相邻处的凹弧缺口近乎不可见。
+        // 横跨 3 列(覆盖 colorBar/headerControl/closeBtn)。
+        bgBorder.CornerRadius(WUX::CornerRadiusHelper::FromUniformRadius(3));
+        bgBorder.Margin(WUX::ThicknessHelper::FromUniformLength(0));
+        // 撑满 grid 的整行高度(= ListViewItem 行高)。bgBorder 默认高度跟内容走,
+        // 只包住中间的文字/图标块,上下露白;显式 Stretch 让橙色背景填满整行高度。
+        bgBorder.VerticalAlignment(WUX::VerticalAlignment::Stretch);
         WUX::Controls::Grid::SetColumn(bgBorder, 0);
         WUX::Controls::Grid::SetColumnSpan(bgBorder, 3);
         grid.Children().Append(bgBorder);
@@ -6735,21 +6739,31 @@ namespace winrt::TerminalApp::implementation
         grid.ContextFlyout(contextMenu);
         } // end if (tabImpl)
 
-        // hover 态:鼠标进入非活动标签时切到 hover 透明度(0.6),离开恢复非活动(0.3)。
+        // hover 态:鼠标进入非活动标签时切到 hover 态，离开恢复非活动态。
         // 活动 tab 不响应 hover(保持实色)。helper 内部按 _GetFocusedTabIndex 判活动。
+        // 重要:不能用创建时捕获的 index——标签重排(Move Up/Down、切顶部再切回)后
+        // index 会变，闭包里的老 index 会指向"现在占据那个位置的另一个标签"，
+        // 导致 hover 一个标签时另一个标签也变色。必须实时用 _tabs.IndexOf 查当前索引。
         {
             auto hoverTabProj = tab;
-            auto hoverIdx = index;
-            grid.PointerEntered([weakThis, hoverTabProj, hoverIdx](auto&&, auto&&) {
+            grid.PointerEntered([weakThis, hoverTabProj](auto&&, auto&&) {
                 if (auto page = weakThis.get())
                 {
-                    page->_ApplySidebarTabColor(hoverTabProj, hoverIdx, true);
+                    uint32_t curIdx = 0;
+                    if (page->_tabs.IndexOf(hoverTabProj, curIdx))
+                    {
+                        page->_ApplySidebarTabColor(hoverTabProj, curIdx, true);
+                    }
                 }
             });
-            grid.PointerExited([weakThis, hoverTabProj, hoverIdx](auto&&, auto&&) {
+            grid.PointerExited([weakThis, hoverTabProj](auto&&, auto&&) {
                 if (auto page = weakThis.get())
                 {
-                    page->_ApplySidebarTabColor(hoverTabProj, hoverIdx, false);
+                    uint32_t curIdx = 0;
+                    if (page->_tabs.IndexOf(hoverTabProj, curIdx))
+                    {
+                        page->_ApplySidebarTabColor(hoverTabProj, curIdx, false);
+                    }
                 }
             });
         }
@@ -6936,13 +6950,58 @@ namespace winrt::TerminalApp::implementation
         }
         if (!tabColorOpt.has_value())
         {
-            // 没设色:透明背景。前景色还原为系统默认主题资源(不能用 nullptr,
-            // nullptr 会清空 brush,浅色主题下文字看不见)。用 ApplicationForegroundThemeBrush
-            // 对应亮/暗主题的默认文字色。
-            bgBd.Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
-            if (hc)
+            // 无色标签：选中固定为深黑底 + 白字（不分主题，按用户明确要求）。
+            // 此前用主题自适应资源（SystemControlBackgroundListMediumBrush /
+            // ApplicationForegroundThemeBrush）时，深色主题下文字解析出来仍是黑、
+            // 与"选中白字"预期不符；改为写死颜色，消除主题资源解析的不确定性。
+            //   选中(活动)：深黑底 + 白字。
+            //   hover(非选中悬停)：稍亮的深灰底 + 白字，有反馈。
+            //   普通未选中：透明底 + 主题默认前景色。
+            // 因默认选中高亮已在 XAML ControlTemplate 里去掉（无 ListViewItemPresenter），
+            // 选中视觉完全由此处 bgBorder 承担。
+            const auto focusedIdx0 = _GetFocusedTabIndex();
+            const bool isActive0 = focusedIdx0.has_value() && *focusedIdx0 == index;
+
+            WUX::Media::SolidColorBrush selBrush;
+            if (isActive0 && !hover)
             {
-                hc.Foreground(winrt::Windows::UI::Xaml::Application::Current().Resources().TryLookup(winrt::box_value(L"ApplicationForegroundThemeBrush")).try_as<WUX::Media::Brush>());
+                // 深黑底（接近纯黑，留极小余量避免与系统黑背景完全融合无层次）。
+                auto c = Windows::UI::Colors::Black();
+                selBrush.Color(c);
+                bgBd.Background(selBrush);
+                if (hc)
+                {
+                    WUX::Media::SolidColorBrush fontBrush;
+                    fontBrush.Color(Windows::UI::Colors::White());
+                    hc.Foreground(fontBrush);
+                }
+            }
+            else if (hover)
+            {
+                // hover：稍亮的深灰（#3A3A3A 一带）+ 白字。
+                auto c = Windows::UI::Colors::Black();
+                c.A = 0x55; // ~0.33 不透明叠在背景上，呈深灰，有反馈但不抢选中态。
+                selBrush.Color(c);
+                bgBd.Background(selBrush);
+                if (hc)
+                {
+                    WUX::Media::SolidColorBrush fontBrush;
+                    fontBrush.Color(Windows::UI::Colors::White());
+                    hc.Foreground(fontBrush);
+                }
+            }
+            else
+            {
+                // 未选中无色标签：透明底。文字色按控件 ActualTheme 判断（不依赖
+                // ApplicationForegroundThemeBrush——该资源在 Dusky/Garish 等自定义深色
+                // 主题下解析出来未必是白，导致深色背景上黑字看不清）。Dark→白字，Light→黑字。
+                bgBd.Background(WUX::Media::SolidColorBrush{ Windows::UI::Colors::Transparent() });
+                if (hc)
+                {
+                    WUX::Media::SolidColorBrush fontBrush;
+                    fontBrush.Color(hc.ActualTheme() == WUX::ElementTheme::Dark ? Windows::UI::Colors::White() : Windows::UI::Colors::Black());
+                    hc.Foreground(fontBrush);
+                }
             }
             return;
         }
@@ -7018,6 +7077,11 @@ namespace winrt::TerminalApp::implementation
             _syncingTabSelection = true;
             _SelectTab(selectedIndex);
             _syncingTabSelection = false;
+            // 选中切换后必须刷新所有侧边栏标签颜色：_ApplySidebarTabColor 按"是否活动"
+            // 重算每个标签的 bgBorder 背景 + 文字色（选中=黑底白字/原色，未选中=透明/置灰）。
+            // 不调这句，选中态的颜色逻辑永远不触发，选中标签不会变色——这正是此前
+            // "选中文字始终不白/底色不变"的根因。
+            _UpdateAllSidebarTabColors();
         }
     }
 
