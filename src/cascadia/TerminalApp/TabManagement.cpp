@@ -1203,6 +1203,12 @@ namespace winrt::TerminalApp::implementation
                     _syncingTabSelection = true;
                     _verticalTabListView.SelectedIndex(selectedIndex);
                     _syncingTabSelection = false;
+                    // 选中态视觉由 bgBorder 承担（侧边栏自定义 ControlTemplate 关掉了
+                    // ListView 内置选中高亮），仅改 SelectedIndex 不会刷新颜色。
+                    // 必须在设完 SelectedIndex 后重算，否则经快捷键/顶部标签栏切换时，
+                    // 高亮会停在旧标签上（仅点击侧边栏这条路径会刷新，见
+                    // _OnVerticalTabSelectionChanged）。
+                    _UpdateAllSidebarTabColors();
                 }
             }
         }
