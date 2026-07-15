@@ -621,6 +621,26 @@
     <value>Comprimento de título</value>
     <comment>An option to choose from for the "tab width mode" setting. When selected, each tab adjusts its width to the content within the tab.</comment>
   </data>
+  <data name="Globals_TabPosition.Header" xml:space="preserve">
+    <value>Posição da guia</value>
+    <comment>Header for a control to choose where the tab strip appears.</comment>
+  </data>
+  <data name="Globals_TabPosition.HelpText" xml:space="preserve">
+    <value>Escolha se as guias aparecem na parte superior ou como uma barra lateral vertical à esquerda ou à direita.</value>
+    <comment>A description for what the "tab position" setting does. Presented near "Globals_TabPosition.Header".</comment>
+  </data>
+  <data name="Globals_TabPositionTop.Content" xml:space="preserve">
+    <value>Superior</value>
+    <comment>An option to choose from for the "tab position" setting. Tabs appear horizontally across the top.</comment>
+  </data>
+  <data name="Globals_TabPositionLeft.Content" xml:space="preserve">
+    <value>Esquerda</value>
+    <comment>An option to choose from for the "tab position" setting. Tabs appear as a vertical sidebar on the left.</comment>
+  </data>
+  <data name="Globals_TabPositionRight.Content" xml:space="preserve">
+    <value>Direita</value>
+    <comment>An option to choose from for the "tab position" setting. Tabs appear as a vertical sidebar on the right.</comment>
+  </data>
   <data name="Globals_Theme.Header" xml:space="preserve">
     <value>Tema do Aplicativo</value>
     <comment>Header for a control to choose the theme colors used in the app.</comment>

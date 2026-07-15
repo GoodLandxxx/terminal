@@ -6695,7 +6695,7 @@ namespace winrt::TerminalApp::implementation
 
             // Move Up
             auto moveUpItem = WUX::Controls::MenuFlyoutItem();
-            moveUpItem.Text(L"Move Up");
+            moveUpItem.Text(RS_(L"SidebarMoveUp"));
             {
                 WUX::Controls::FontIcon upIcon;
                 upIcon.FontFamily(WUX::Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
@@ -6716,7 +6716,7 @@ namespace winrt::TerminalApp::implementation
 
             // Move Down
             auto moveDownItem = WUX::Controls::MenuFlyoutItem();
-            moveDownItem.Text(L"Move Down");
+            moveDownItem.Text(RS_(L"SidebarMoveDown"));
             {
                 WUX::Controls::FontIcon downIcon;
                 downIcon.FontFamily(WUX::Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });

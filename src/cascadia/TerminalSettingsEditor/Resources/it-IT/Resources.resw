@@ -621,6 +621,26 @@
     <value>Lunghezza titolo</value>
     <comment>An option to choose from for the "tab width mode" setting. When selected, each tab adjusts its width to the content within the tab.</comment>
   </data>
+  <data name="Globals_TabPosition.Header" xml:space="preserve">
+    <value>Posizione schede</value>
+    <comment>Header for a control to choose where the tab strip appears.</comment>
+  </data>
+  <data name="Globals_TabPosition.HelpText" xml:space="preserve">
+    <value>Scegli se le schede vengono visualizzate in alto o come barra laterale verticale a sinistra o a destra.</value>
+    <comment>A description for what the "tab position" setting does. Presented near "Globals_TabPosition.Header".</comment>
+  </data>
+  <data name="Globals_TabPositionTop.Content" xml:space="preserve">
+    <value>In alto</value>
+    <comment>An option to choose from for the "tab position" setting. Tabs appear horizontally across the top.</comment>
+  </data>
+  <data name="Globals_TabPositionLeft.Content" xml:space="preserve">
+    <value>Sinistra</value>
+    <comment>An option to choose from for the "tab position" setting. Tabs appear as a vertical sidebar on the left.</comment>
+  </data>
+  <data name="Globals_TabPositionRight.Content" xml:space="preserve">
+    <value>Destra</value>
+    <comment>An option to choose from for the "tab position" setting. Tabs appear as a vertical sidebar on the right.</comment>
+  </data>
   <data name="Globals_Theme.Header" xml:space="preserve">
     <value>Tema applicazione</value>
     <comment>Header for a control to choose the theme colors used in the app.</comment>

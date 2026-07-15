@@ -997,6 +997,14 @@
   <data name="TabMoveRight" xml:space="preserve">
     <value>Mover para a direita</value>
   </data>
+  <data name="SidebarMoveUp" xml:space="preserve">
+    <value>Mover para cima</value>
+    <comment>Menu item in the vertical sidebar's right-click context menu. Moves the tab one position up in the sidebar list.</comment>
+  </data>
+  <data name="SidebarMoveDown" xml:space="preserve">
+    <value>Mover para baixo</value>
+    <comment>Menu item in the vertical sidebar's right-click context menu. Moves the tab one position down in the sidebar list.</comment>
+  </data>
   <data name="InvalidRegex" xml:space="preserve">
     <value>Foi encontrada uma expressão regular inválida.</value>
   </data>
