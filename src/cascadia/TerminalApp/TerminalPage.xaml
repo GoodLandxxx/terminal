@@ -27,7 +27,8 @@
               MinWidth="48"
               Width="200"
               MaxWidth="400"
-              Background="{ThemeResource TabViewBackground}">
+              Background="{ThemeResource TabViewBackground}"
+              KeyDown="_KeyDownHandler">
             <Grid.RowDefinitions>
                 <RowDefinition Height="*" />
                 <RowDefinition Height="Auto" />
