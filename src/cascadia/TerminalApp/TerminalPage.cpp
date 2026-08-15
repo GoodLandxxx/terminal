@@ -276,7 +276,7 @@ namespace winrt::TerminalApp::implementation
         if (_settings == nullptr)
         {
             // Create this only on the first time we load the settings.
-            _terminalSettingsCache = std::make_shared<TerminalSettingsCache>(settings);
+            _terminalSettingsCache = std::make_shared<TerminalSettingsCache>(settings, settings.WindowSettings(_WindowProperties.WindowName()));
         }
         _settings = settings;
 
@@ -296,6 +296,11 @@ namespace winrt::TerminalApp::implementation
         // Upon settings update we reload the system settings for scrolling as well.
         // TODO: consider reloading this value periodically.
         _systemRowsToScroll = _ReadSystemRowsToScroll();
+    }
+
+    winrt::Microsoft::Terminal::Settings::Model::WindowSettings TerminalPage::_currentWindowSettings() const
+    {
+        return _settings.WindowSettings(_WindowProperties.WindowName());
     }
 
     bool TerminalPage::IsRunningElevated() const noexcept
@@ -359,11 +364,22 @@ namespace winrt::TerminalApp::implementation
         // Apply the tab position setting (top/left/right)
         _ApplyTabPosition();
 
+        if (_currentWindowSettings().ShowTabsInTitlebar())
+        {
+            // Remove the TabView from the page. We'll hang on to it, we need to
+            // put it in the titlebar.
+            uint32_t index = 0;
+            if (this->Root().Children().IndexOf(_tabRow, index))
+            {
+                this->Root().Children().RemoveAt(index);
+            }
+        }
+
         _updateThemeColors();
 
         // Initialize the state of the CloseButtonOverlayMode property of
         // our TabView, to match the tab.showCloseButton property in the theme.
-        if (const auto theme = _settings.GlobalSettings().CurrentTheme())
+        if (const auto theme = _settings.GlobalSettings().CurrentTheme(_currentWindowSettings()))
         {
             const auto visibility = theme.Tab() ? theme.Tab().ShowCloseButton() : Settings::Model::TabCloseButtonVisibility::Always;
 
@@ -418,7 +434,7 @@ namespace winrt::TerminalApp::implementation
         // Settings AllowDependentAnimations will affect whether animations are
         // enabled application-wide, so we don't need to check it each time we
         // want to create an animation.
-        WUX::Media::Animation::Timeline::AllowDependentAnimations(!_settings.GlobalSettings().DisableAnimations());
+        WUX::Media::Animation::Timeline::AllowDependentAnimations(!_currentWindowSettings().DisableAnimations());
 
         // Once the page is actually laid out on the screen, trigger all our
         // startup actions. Things like Panes need to know at least how big the
@@ -427,17 +443,17 @@ namespace winrt::TerminalApp::implementation
         // _OnFirstLayout will remove this handler so it doesn't get called more than once.
         _layoutUpdatedRevoker = _tabContent.LayoutUpdated(winrt::auto_revoke, { this, &TerminalPage::_OnFirstLayout });
 
-        _isAlwaysOnTop = _settings.GlobalSettings().AlwaysOnTop();
-        _showTabsFullscreen = _settings.GlobalSettings().ShowTabsFullscreen();
+        _isAlwaysOnTop = _currentWindowSettings().AlwaysOnTop();
+        _showTabsFullscreen = _currentWindowSettings().ShowTabsFullscreen();
 
         // DON'T set up Toasts/TeachingTips here. They should be loaded and
         // initialized the first time they're opened, in whatever method opens
         // them.
 
-        _tabRow.ShowElevationShield(IsRunningElevated() && _settings.GlobalSettings().ShowAdminShield());
+        _tabRow.ShowElevationShield(IsRunningElevated() && _currentWindowSettings().ShowAdminShield());
 
         // Apply the ShowWorkspacesButton theme setting.
-        if (const auto theme = _settings.GlobalSettings().CurrentTheme())
+        if (const auto theme = _settings.GlobalSettings().CurrentTheme(_currentWindowSettings()))
         {
             _tabRow.ShowWorkspacesButton(theme.Window() ? theme.Window().ShowWorkspacesButton() : true);
         }
@@ -1002,7 +1018,7 @@ namespace winrt::TerminalApp::implementation
         // Create profile entries from the NewTabMenu configuration using a
         // recursive helper function. This returns a std::vector of FlyoutItemBases,
         // that we then add to our Flyout.
-        auto entries = _settings.GlobalSettings().NewTabMenu();
+        auto entries = _currentWindowSettings().NewTabMenu();
         auto items = _CreateNewTabFlyoutItems(entries);
         for (const auto& item : items)
         {
@@ -1296,7 +1312,7 @@ namespace winrt::TerminalApp::implementation
             profileMenuItem.Icon(icon);
         }
 
-        if (profile.Guid() == _settings.GlobalSettings().DefaultProfile())
+        if (profile.Guid() == _currentWindowSettings().DefaultProfile())
         {
             // Contrast the default profile with others in font weight.
             profileMenuItem.FontWeight(FontWeights::Bold());
@@ -1533,7 +1549,7 @@ namespace winrt::TerminalApp::implementation
                                                                                         const bool inheritCursor)
     {
         static const auto textMeasurement = [&]() -> std::wstring_view {
-            switch (_settings.GlobalSettings().TextMeasurement())
+            switch (_currentWindowSettings().TextMeasurement())
             {
             case TextMeasurement::Graphemes:
                 return L"graphemes";
@@ -1546,7 +1562,7 @@ namespace winrt::TerminalApp::implementation
             }
         }();
         static const auto ambiguousIsWide = [&]() -> bool {
-            return _settings.GlobalSettings().AmbiguousWidth() == AmbiguousWidth::Wide;
+            return _currentWindowSettings().AmbiguousWidth() == AmbiguousWidth::Wide;
         }();
 
         TerminalConnection::ITerminalConnection connection{ nullptr };
@@ -1659,7 +1675,7 @@ namespace winrt::TerminalApp::implementation
         {
             // TODO GH#5047 If we cache the NewTerminalArgs, we no longer need to do this.
             profile = GetClosestProfileForDuplicationOfProfile(profile);
-            controlSettings = Settings::TerminalSettings::CreateWithProfile(_settings, profile);
+            controlSettings = Settings::TerminalSettings::CreateWithProfile(_settings, _currentWindowSettings(), profile);
 
             // Replace the Starting directory with the CWD, if given
             const auto workingDirectory = control.WorkingDirectory();
@@ -3001,7 +3017,7 @@ namespace winrt::TerminalApp::implementation
     // - the title of the focused control if there is one, else "Terminal"
     hstring TerminalPage::Title()
     {
-        if (_settings.GlobalSettings().ShowTitleInTitlebar())
+        if (_currentWindowSettings().ShowTitleInTitlebar())
         {
             if (const auto tab{ _GetFocusedTab() })
             {
@@ -3090,7 +3106,7 @@ namespace winrt::TerminalApp::implementation
     // - See Pane::CalcSnappedDimension
     float TerminalPage::CalcSnappedDimension(const bool widthOrHeight, const float dimension) const
     {
-        if (_settings && _settings.GlobalSettings().SnapToGridOnResize())
+        if (_settings && _currentWindowSettings().SnapToGridOnResize())
         {
             if (const auto tabImpl{ _GetFocusedTabImpl() })
             {
@@ -3118,7 +3134,7 @@ namespace winrt::TerminalApp::implementation
         // the WinRT one on average, depending on CPU load. Don't use the WinRT clipboard API if you can.
         const auto weakThis = get_weak();
         const auto dispatcher = Dispatcher();
-        const auto globalSettings = _settings.GlobalSettings();
+        const auto windowSettings = _currentWindowSettings();
         const auto bracketedPaste = eventArgs.BracketedPasteEnabled();
         const auto sourceId = sender.try_as<ControlInteractivity>().Id();
 
@@ -3131,7 +3147,7 @@ namespace winrt::TerminalApp::implementation
             text = clipboard::read();
         }
 
-        if (!bracketedPaste && globalSettings.TrimPaste())
+        if (!bracketedPaste && windowSettings.TrimPaste())
         {
             text = winrt::hstring{ Utils::TrimPaste(text) };
         }
@@ -3146,7 +3162,7 @@ namespace winrt::TerminalApp::implementation
         }
 
         bool warnMultiLine = false;
-        switch (globalSettings.WarnAboutMultiLinePaste())
+        switch (windowSettings.WarnAboutMultiLinePaste())
         {
         case WarnAboutMultiLinePaste::Automatic:
             // NOTE that this is unsafe, because a shell that doesn't support bracketed paste
@@ -3169,7 +3185,7 @@ namespace winrt::TerminalApp::implementation
         }
 
         constexpr std::size_t minimumSizeForWarning = 1024 * 5; // 5 KiB
-        const auto warnLargeText = text.size() > minimumSizeForWarning && globalSettings.WarnAboutLargePaste();
+        const auto warnLargeText = text.size() > minimumSizeForWarning && windowSettings.WarnAboutLargePaste();
 
         if (warnMultiLine || warnLargeText)
         {
@@ -3382,7 +3398,7 @@ namespace winrt::TerminalApp::implementation
 
             return true;
         }
-        if (const auto& safeSchemes = _settings.GlobalSettings().SafeUriSchemes())
+        if (const auto& safeSchemes = _currentWindowSettings().SafeUriSchemes())
         {
             for (const auto& scheme : safeSchemes)
             {
@@ -3781,7 +3797,7 @@ namespace winrt::TerminalApp::implementation
             {
                 // TODO GH#5047 If we cache the NewTerminalArgs, we no longer need to do this.
                 profile = GetClosestProfileForDuplicationOfProfile(profile);
-                controlSettings = Settings::TerminalSettings::CreateWithProfile(_settings, profile);
+                controlSettings = Settings::TerminalSettings::CreateWithProfile(_settings, _currentWindowSettings(), profile);
                 const auto workingDirectory = tabImpl->GetActiveTerminalControl().WorkingDirectory();
                 if (Utils::IsValidDirectory(workingDirectory.c_str()))
                 {
@@ -3792,7 +3808,7 @@ namespace winrt::TerminalApp::implementation
         if (!profile)
         {
             profile = _settings.GetProfileForArgs(newTerminalArgs);
-            controlSettings = Settings::TerminalSettings::CreateWithNewTerminalArgs(_settings, newTerminalArgs);
+            controlSettings = Settings::TerminalSettings::CreateWithNewTerminalArgs(_settings, _currentWindowSettings(), newTerminalArgs);
         }
 
         // Try to handle auto-elevation
@@ -3919,7 +3935,7 @@ namespace winrt::TerminalApp::implementation
             }
 
             const auto& tasksContent{ winrt::make_self<SnippetsPaneContent>() };
-            tasksContent->UpdateSettings(_settings);
+            tasksContent->UpdateSettings(_settings, _currentWindowSettings());
             tasksContent->GetRoot().KeyDown({ this, &TerminalPage::_KeyDownHandler });
             tasksContent->DispatchCommandRequested({ this, &TerminalPage::_OnDispatchCommandRequested });
             if (const auto& termControl{ _GetActiveControl() })
@@ -3934,7 +3950,7 @@ namespace winrt::TerminalApp::implementation
             if (Feature_MarkdownPane::IsEnabled())
             {
                 const auto& markdownContent{ winrt::make_self<MarkdownPaneContent>(L"") };
-                markdownContent->UpdateSettings(_settings);
+                markdownContent->UpdateSettings(_settings, _currentWindowSettings());
                 markdownContent->GetRoot().KeyDown({ this, &TerminalPage::_KeyDownHandler });
 
                 // This one doesn't use DispatchCommand, because we don't create
@@ -3989,7 +4005,7 @@ namespace winrt::TerminalApp::implementation
     // - <none>
     void TerminalPage::_SetBackgroundImage(const winrt::Microsoft::Terminal::Settings::Model::IAppearanceConfig& newAppearance)
     {
-        if (!_settings.GlobalSettings().UseBackgroundImageForWindow())
+        if (!_currentWindowSettings().UseBackgroundImageForWindow())
         {
             _tabContent.Background(nullptr);
             return;
@@ -4060,14 +4076,15 @@ namespace winrt::TerminalApp::implementation
         // updating terminal panes, so that we don't have to build a _new_
         // TerminalSettings for every profile we update - we can just look them
         // up the previous ones we built.
-        _terminalSettingsCache->Reset(_settings);
+        _terminalSettingsCache->Reset(_settings, _currentWindowSettings());
 
+        const auto windowSettings = _currentWindowSettings();
         for (const auto& tab : _tabs)
         {
             if (auto tabImpl{ _GetTabImpl(tab) })
             {
                 // Let the tab know that there are new settings. It's up to each content to decide what to do with them.
-                tabImpl->UpdateSettings(_settings);
+                tabImpl->UpdateSettings(_settings, windowSettings);
 
                 // Update the icon of the tab for the currently focused profile in that tab.
                 // Only do this for TerminalTabs. Other types of tabs won't have multiple panes
@@ -4100,20 +4117,20 @@ namespace winrt::TerminalApp::implementation
         // Reload the current value of alwaysOnTop from the settings file. This
         // will let the user hot-reload this setting, but any runtime changes to
         // the alwaysOnTop setting will be lost.
-        _isAlwaysOnTop = _settings.GlobalSettings().AlwaysOnTop();
+        _isAlwaysOnTop = _currentWindowSettings().AlwaysOnTop();
         AlwaysOnTopChanged.raise(*this, nullptr);
 
-        _showTabsFullscreen = _settings.GlobalSettings().ShowTabsFullscreen();
+        _showTabsFullscreen = _currentWindowSettings().ShowTabsFullscreen();
 
         // Settings AllowDependentAnimations will affect whether animations are
         // enabled application-wide, so we don't need to check it each time we
         // want to create an animation.
-        WUX::Media::Animation::Timeline::AllowDependentAnimations(!_settings.GlobalSettings().DisableAnimations());
+        WUX::Media::Animation::Timeline::AllowDependentAnimations(!_currentWindowSettings().DisableAnimations());
 
-        _tabRow.ShowElevationShield(IsRunningElevated() && _settings.GlobalSettings().ShowAdminShield());
+        _tabRow.ShowElevationShield(IsRunningElevated() && _currentWindowSettings().ShowAdminShield());
 
         // Apply the ShowWorkspacesButton theme setting.
-        if (const auto theme = _settings.GlobalSettings().CurrentTheme())
+        if (const auto theme = _settings.GlobalSettings().CurrentTheme(_currentWindowSettings()))
         {
             _tabRow.ShowWorkspacesButton(theme.Window() ? theme.Window().ShowWorkspacesButton() : true);
         }
@@ -4139,7 +4156,7 @@ namespace winrt::TerminalApp::implementation
         // our TabView, to match the tab.showCloseButton property in the theme.
         //
         // Also update every tab's individual IsClosable to match the same property.
-        const auto theme = _settings.GlobalSettings().CurrentTheme();
+        const auto theme = _settings.GlobalSettings().CurrentTheme(_currentWindowSettings());
         const auto visibility = (theme && theme.Tab()) ?
                                     theme.Tab().ShowCloseButton() :
                                     Settings::Model::TabCloseButtonVisibility::Always;
@@ -4577,7 +4594,7 @@ namespace winrt::TerminalApp::implementation
         }
 
         // Create the SUI pane content
-        auto settingsContent{ winrt::make_self<SettingsPaneContent>(_settings) };
+        auto settingsContent{ winrt::make_self<SettingsPaneContent>(_settings, _currentWindowSettings()) };
         auto sui = settingsContent->SettingsUI();
 
         if (_hostingHwnd)
@@ -4753,7 +4770,7 @@ namespace winrt::TerminalApp::implementation
     // - <none>
     void TerminalPage::_UpdateTeachingTipTheme(winrt::Windows::UI::Xaml::FrameworkElement element)
     {
-        auto theme{ _settings.GlobalSettings().CurrentTheme() };
+        auto theme{ _settings.GlobalSettings().CurrentTheme(_currentWindowSettings()) };
         auto requestedTheme{ theme.RequestedTheme() };
         while (element)
         {
@@ -4906,7 +4923,7 @@ namespace winrt::TerminalApp::implementation
     {
         if (profile == _settings.ProfileDefaults())
         {
-            return _settings.FindProfile(_settings.GlobalSettings().DefaultProfile());
+            return _settings.FindProfile(_currentWindowSettings().DefaultProfile());
         }
         return profile;
     }
@@ -5127,7 +5144,7 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
-        const auto theme = _settings.GlobalSettings().CurrentTheme();
+        const auto theme = _settings.GlobalSettings().CurrentTheme(_currentWindowSettings());
         auto requestedTheme{ theme.RequestedTheme() };
 
         {
@@ -5171,7 +5188,7 @@ namespace winrt::TerminalApp::implementation
                                                             theme.TabRow().UnfocusedBackground()) :
                                               ThemeColor{ nullptr } };
 
-        if (_settings.GlobalSettings().UseAcrylicInTabRow() && (_activated || _settings.GlobalSettings().EnableUnfocusedAcrylic()))
+        if (_currentWindowSettings().UseAcrylicInTabRow() && (_activated || _currentWindowSettings().EnableUnfocusedAcrylic()))
         {
             if (tabRowBg)
             {
@@ -5201,7 +5218,7 @@ namespace winrt::TerminalApp::implementation
             TitlebarBrush(backgroundSolidBrush);
         }
 
-        if (!_settings.GlobalSettings().ShowTabsInTitlebar())
+        if (!_currentWindowSettings().ShowTabsInTitlebar())
         {
             _tabRow.Background(TitlebarBrush());
         }
@@ -5437,7 +5454,7 @@ namespace winrt::TerminalApp::implementation
         // Feature_ShellCompletions::IsEnabled back in _RegisterTerminalEvents
 
         // User must explicitly opt-in on Preview builds
-        if (!_settings.GlobalSettings().EnableShellCompletionMenu())
+        if (!_currentWindowSettings().EnableShellCompletionMenu())
         {
             co_return;
         }
@@ -7119,7 +7136,7 @@ namespace winrt::TerminalApp::implementation
     // theme setting. Called from _ApplyTabPosition and from settings reload.
     void TerminalPage::_UpdateSidebarWorkspaceButtonVisibility()
     {
-        const auto tabPos = _settings.GlobalSettings().TabPosition();
+        const auto tabPos = _currentWindowSettings().TabPosition();
         if (tabPos == TabPosition::Top)
         {
             if (auto wsBtn = this->VerticalWorkspaceButton())
@@ -7129,7 +7146,7 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         bool showWorkspaces = true;
-        if (const auto theme = _settings.GlobalSettings().CurrentTheme())
+        if (const auto theme = _settings.GlobalSettings().CurrentTheme(_currentWindowSettings()))
         {
             showWorkspaces = theme.Window() ? theme.Window().ShowWorkspacesButton() : true;
         }
@@ -7163,7 +7180,7 @@ namespace winrt::TerminalApp::implementation
         auto delta = currentX - _sidebarResizeStartX;
 
         // When sidebar is on the right, dragging left increases width
-        const auto tabPos = _settings.GlobalSettings().TabPosition();
+        const auto tabPos = _currentWindowSettings().TabPosition();
         if (tabPos == TabPosition::Right)
         {
             delta = -delta;
@@ -7204,7 +7221,7 @@ namespace winrt::TerminalApp::implementation
 
     void TerminalPage::_ApplyTabPosition()
     {
-        const auto tabPos = _settings.GlobalSettings().TabPosition();
+        const auto tabPos = _currentWindowSettings().TabPosition();
         auto sidebar = this->VerticalTabSidebar();
         auto grip = this->SidebarResizeGrip();
 
